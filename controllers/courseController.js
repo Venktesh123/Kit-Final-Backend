@@ -9,7 +9,6 @@ const WeeklyPlan = require("../models/WeeklyPlan");
 const CreditPoints = require("../models/CreditPoints");
 const Assignment = require("../models/Assignment");
 const CourseAttendance = require("../models/CourseAttendance");
-const Article = require("../models/Article");
 const mongoose = require("mongoose");
 const {
   uploadFileToAzure,
@@ -22,58 +21,28 @@ const logger = {
   error: (message, error) => console.error(`[ERROR] ${message}`, error),
 };
 
-// Helper function to parse image field
-const parseImageField = (imageData) => {
-  if (!imageData) {
-    return { imageUrl: "", imageKey: "" };
-  }
-
-  if (typeof imageData === "object") {
-    return {
-      imageUrl: imageData.imageUrl || "",
-      imageKey: imageData.imageKey || "",
-    };
-  }
-
-  return {
-    imageUrl: imageData || "",
-    imageKey: "",
-  };
-};
-
-// SHARED UTILITY: Get syllabus with populated articles (used by multiple functions)
-const getSyllabusWithArticles = async (courseId) => {
+// SHARED UTILITY: Get syllabus with populated lectures (simplified)
+const getSyllabusWithLectures = async (courseId) => {
   const syllabus = await CourseSyllabus.findOne({ course: courseId }).populate({
-    path: "modules.chapters.articles",
-    model: "Article",
-    select: "title content author date time image order",
+    path: "modules.lectures",
+    model: "Lecture",
+    select:
+      "title content videoUrl videoKey moduleNumber lectureOrder isReviewed reviewDeadline createdAt updatedAt",
   });
 
   if (!syllabus) return null;
 
-  // Process and sort articles once
+  // Process and sort lectures
   return {
     ...syllabus.toObject(),
     modules: syllabus.modules.map((module) => ({
       ...module.toObject(),
-      chapters: module.chapters.map((chapter) => ({
-        ...chapter.toObject(),
-        // Sort articles manually after population
-        articles: chapter.articles
-          ? [...chapter.articles]
-              .sort((a, b) => (a.order || 0) - (b.order || 0))
-              .map((article) => ({
-                _id: article._id,
-                title: article.title,
-                content: article.content,
-                author: article.author,
-                date: article.date,
-                time: article.time,
-                image: article.image,
-                order: article.order,
-              }))
-          : [],
-      })),
+      // Sort lectures by order
+      lectures: module.lectures
+        ? [...module.lectures].sort(
+            (a, b) => (a.lectureOrder || 0) - (b.lectureOrder || 0)
+          )
+        : [],
     })),
   };
 };
@@ -127,10 +96,10 @@ const formatCourseData = async (course) => {
     }
   }
 
-  // Get syllabus with articles (using shared utility)
+  // Get syllabus with lectures (using shared utility)
   let syllabusData = null;
   if (course.syllabus) {
-    const populatedSyllabus = await getSyllabusWithArticles(course._id);
+    const populatedSyllabus = await getSyllabusWithLectures(course._id);
 
     if (populatedSyllabus) {
       // Get lectures organized by module (using shared utility)
@@ -144,44 +113,45 @@ const formatCourseData = async (course) => {
 
           return {
             _id: module._id,
-            id: module.id,
-            name: module.name,
-            active: module.active,
-            title: module.title,
             moduleNumber: module.moduleNumber,
             moduleTitle: module.moduleTitle,
             description: module.description,
-            topics: module.topics,
             isActive: module.isActive,
             order: module.order,
-            link: module.link || "",
-            chapters: module.chapters.map((chapter) => ({
-              _id: chapter._id,
-              id: chapter.id,
-              title: chapter.title,
-              description: chapter.description,
-              color: chapter.color,
-              isActive: chapter.isActive,
-              order: chapter.order,
-              // UPDATED: Include the new link field
-              link: chapter.link || [],
-              articles: chapter.articles, // Already sorted by utility function
-              articleCount: chapter.articles.length,
-            })),
-            contentItems: module.contentItems || [],
-            resources: module.resources || [],
+
+            // Simplified content types only
+            videos: module.videos
+              ? [...module.videos].sort(
+                  (a, b) => (a.order || 0) - (b.order || 0)
+                )
+              : [],
+            links: module.links
+              ? [...module.links].sort(
+                  (a, b) => (a.order || 0) - (b.order || 0)
+                )
+              : [],
+            pdfs: module.pdfs
+              ? [...module.pdfs].sort((a, b) => (a.order || 0) - (b.order || 0))
+              : [],
+            ppts: module.ppts
+              ? [...module.ppts].sort((a, b) => (a.order || 0) - (b.order || 0))
+              : [],
+
             lectures: moduleLectures, // Full lecture data with URLs
+
+            // Content counts
+            videoCount: module.videos ? module.videos.length : 0,
+            linkCount: module.links ? module.links.length : 0,
+            pdfCount: module.pdfs ? module.pdfs.length : 0,
+            pptCount: module.ppts ? module.ppts.length : 0,
             lectureCount: moduleLectures.length,
-            chapterCount: module.chapters.length,
-            totalArticles: module.chapters.reduce(
-              (total, chapter) => total + chapter.articles.length,
-              0
-            ),
+
             hasContent:
-              module.contentItems?.length > 0 ||
-              module.resources?.length > 0 ||
-              moduleLectures.length > 0 ||
-              module.chapters.some((chapter) => chapter.articles.length > 0),
+              module.videos?.length > 0 ||
+              module.links?.length > 0 ||
+              module.pdfs?.length > 0 ||
+              module.ppts?.length > 0 ||
+              moduleLectures.length > 0,
           };
         }),
         createdAt: populatedSyllabus.createdAt,
@@ -211,7 +181,7 @@ const formatCourseData = async (course) => {
     _id: course._id,
     title: course.title,
     aboutCourse: course.aboutCourse,
-    courseCode: course.courseCode, // NEW: Include course code
+    courseCode: course.courseCode,
     semester: course.semester,
     teacher: course.teacher,
     creditPoints: course.creditPoints
@@ -305,7 +275,7 @@ const getCourseById = async function (req, res) {
       });
 
       if (teacher) {
-        // NEW: Check if teacher has access to this course code
+        // Check if teacher has access to this course code
         if (teacher.courseCodes.includes(course.courseCode)) {
           hasAccess = true;
           userDetails = {
@@ -318,10 +288,10 @@ const getCourseById = async function (req, res) {
             address: teacher.user?.fullPermanentAddress,
           };
 
-          // Get students for teacher - UPDATED: Only students with matching course code
+          // Get students for teacher - Only students with matching course code
           const studentsForCourse = await Student.find({
             teacher: teacher._id,
-            courseCodes: course.courseCode, // Filter by course code
+            courseCodes: course.courseCode,
           }).populate({
             path: "user",
             select:
@@ -352,7 +322,7 @@ const getCourseById = async function (req, res) {
       });
 
       if (student) {
-        // NEW: Check if student has access to this course code
+        // Check if student has access to this course code
         const isEnrolledInCourse = student.courses.some(
           (id) => id.toString() === req.params.courseId
         );
@@ -395,7 +365,7 @@ const getCourseById = async function (req, res) {
       id: formattedCourse._id,
       title: formattedCourse.title,
       aboutCourse: formattedCourse.aboutCourse,
-      courseCode: formattedCourse.courseCode, // NEW: Include course code
+      courseCode: formattedCourse.courseCode,
       semester: formattedCourse.semester,
       creditPoints: formattedCourse.creditPoints,
       learningOutcomes: formattedCourse.learningOutcomes,
@@ -453,14 +423,14 @@ const getCourseById = async function (req, res) {
   }
 };
 
-// UNIFIED: Get user courses (same response format for both teacher/student) - UPDATED with course code filtering
+// UNIFIED: Get user courses (same response format for both teacher/student)
 const getUserCourses = async function (req, res) {
   try {
     logger.info(`Fetching courses for user with ID: ${req.user.id}`);
     const userRole = req.user.role;
 
     if (userRole === "teacher") {
-      // TEACHER LOGIC - UPDATED with course code filtering
+      // TEACHER LOGIC - with course code filtering
       const teacher = await Teacher.findOne({ user: req.user.id }).populate({
         path: "user",
         select: "name email role mobileNo gender ageAsOn2025",
@@ -471,10 +441,10 @@ const getUserCourses = async function (req, res) {
         return res.status(404).json({ error: "Teacher not found" });
       }
 
-      // NEW: Filter courses by teacher's course codes
+      // Filter courses by teacher's course codes
       const courses = await Course.find({
         teacher: teacher._id,
-        courseCode: { $in: teacher.courseCodes }, // Only courses with matching course codes
+        courseCode: { $in: teacher.courseCodes },
       })
         .select(
           "_id title aboutCourse courseCode assignments attendance schedule semester"
@@ -508,7 +478,7 @@ const getUserCourses = async function (req, res) {
             _id: course._id,
             title: course.title,
             aboutCourse: course.aboutCourse,
-            courseCode: course.courseCode, // NEW: Include course code
+            courseCode: course.courseCode,
             semester: course.semester
               ? {
                   _id: course.semester._id,
@@ -567,13 +537,13 @@ const getUserCourses = async function (req, res) {
           mobileNo: teacher.user?.mobileNo,
           gender: teacher.user?.gender,
           age: teacher.user?.ageAsOn2025,
-          courseCodes: teacher.courseCodes, // NEW: Include teacher's course codes
+          courseCodes: teacher.courseCodes,
           totalCourses: courses.length || 0,
         },
         courses: coursesWithData,
       });
     } else if (userRole === "student") {
-      // STUDENT LOGIC - UPDATED with course code filtering
+      // STUDENT LOGIC - with course code filtering
       const student = await Student.findOne({ user: req.user.id }).populate({
         path: "user",
         select: "name email role mobileNo gender ageAsOn2025 bloodGroup",
@@ -598,17 +568,17 @@ const getUserCourses = async function (req, res) {
             gender: student.user?.gender,
             age: student.user?.ageAsOn2025,
             bloodGroup: student.user?.bloodGroup,
-            courseCodes: student.courseCodes, // NEW: Include student's course codes
+            courseCodes: student.courseCodes,
             totalCourses: 0,
           },
           courses: [],
         });
       }
 
-      // NEW: Filter courses by student's course codes
+      // Filter courses by student's course codes
       const courses = await Course.find({
         _id: { $in: courseIds },
-        courseCode: { $in: student.courseCodes }, // Only courses with matching course codes
+        courseCode: { $in: student.courseCodes },
       })
         .select(
           "_id title aboutCourse courseCode assignments attendance schedule semester"
@@ -636,7 +606,7 @@ const getUserCourses = async function (req, res) {
             _id: course._id,
             title: course.title,
             aboutCourse: course.aboutCourse,
-            courseCode: course.courseCode, // NEW: Include course code
+            courseCode: course.courseCode,
             semester: course.semester
               ? {
                   _id: course.semester._id,
@@ -708,7 +678,7 @@ const getUserCourses = async function (req, res) {
           gender: student.user?.gender,
           age: student.user?.ageAsOn2025,
           bloodGroup: student.user?.bloodGroup,
-          courseCodes: student.courseCodes, // NEW: Include student's course codes
+          courseCodes: student.courseCodes,
           totalCourses: courses.length || 0,
         },
         courses: coursesWithData,
@@ -722,7 +692,7 @@ const getUserCourses = async function (req, res) {
   }
 };
 
-// SIMPLIFIED: Get enrolled courses for students (alternative endpoint) - UPDATED with course code filtering
+// SIMPLIFIED: Get enrolled courses for students
 const getEnrolledCourses = async function (req, res) {
   try {
     logger.info(
@@ -762,17 +732,17 @@ const getEnrolledCourses = async function (req, res) {
           age: student.user?.ageAsOn2025,
           bloodGroup: student.user?.bloodGroup,
           address: student.user?.fullPermanentAddress,
-          courseCodes: student.courseCodes, // NEW: Include student's course codes
+          courseCodes: student.courseCodes,
           totalCourses: 0,
         },
         courses: [],
       });
     }
 
-    // NEW: Simple course query without complex populations - filtered by course codes
+    // Simple course query without complex populations - filtered by course codes
     const courses = await Course.find({
       _id: { $in: courseIds },
-      courseCode: { $in: student.courseCodes }, // Only courses with matching course codes
+      courseCode: { $in: student.courseCodes },
     })
       .select("_id title aboutCourse courseCode")
       .populate("semester", "name startDate endDate")
@@ -790,7 +760,7 @@ const getEnrolledCourses = async function (req, res) {
           _id: course._id,
           title: course.title,
           aboutCourse: course.aboutCourse,
-          courseCode: course.courseCode, // NEW: Include course code
+          courseCode: course.courseCode,
           semester: course.semester
             ? {
                 _id: course.semester._id,
@@ -821,7 +791,7 @@ const getEnrolledCourses = async function (req, res) {
         age: student.user?.ageAsOn2025,
         bloodGroup: student.user?.bloodGroup,
         address: student.user?.fullPermanentAddress,
-        courseCodes: student.courseCodes, // NEW: Include student's course codes
+        courseCodes: student.courseCodes,
         totalCourses: courses.length || 0,
       },
       courses: coursesWithLectureCounts,
@@ -832,7 +802,7 @@ const getEnrolledCourses = async function (req, res) {
   }
 };
 
-// Create new course (updated to include course code validation)
+// Create new course (simplified syllabus creation)
 const createCourse = async function (req, res) {
   logger.info("Starting createCourse controller function");
 
@@ -855,7 +825,7 @@ const createCourse = async function (req, res) {
       throw new Error("Teacher not found");
     }
 
-    // NEW: Validate course code
+    // Validate course code
     const { courseCode } = req.body;
     if (!courseCode) {
       throw new Error("Course code is required");
@@ -863,7 +833,7 @@ const createCourse = async function (req, res) {
 
     const normalizedCourseCode = courseCode.toUpperCase().trim();
 
-    // NEW: Check if teacher is authorized to create course with this course code
+    // Check if teacher is authorized to create course with this course code
     if (!teacher.courseCodes.includes(normalizedCourseCode)) {
       throw new Error(
         `You are not authorized to create courses with course code: ${normalizedCourseCode}. Your authorized course codes are: ${teacher.courseCodes.join(
@@ -876,7 +846,7 @@ const createCourse = async function (req, res) {
     const courseData = {
       title: req.body.title,
       aboutCourse: req.body.aboutCourse,
-      courseCode: normalizedCourseCode, // NEW: Include course code
+      courseCode: normalizedCourseCode,
       semester: req.body.semester,
       teacher: teacher._id,
     };
@@ -915,7 +885,7 @@ const createCourse = async function (req, res) {
       logger.info(`Course schedule created with ID: ${schedule[0]._id}`);
     }
 
-    // Create syllabus with proper module structure including chapters and articles
+    // Create simplified syllabus with only required content types
     if (
       req.body.syllabus &&
       req.body.syllabus.modules &&
@@ -923,88 +893,23 @@ const createCourse = async function (req, res) {
     ) {
       logger.info("Creating course syllabus");
 
-      const modulesWithChapters = [];
-
-      for (const [moduleIndex, module] of req.body.syllabus.modules.entries()) {
-        const moduleData = {
-          id: module.id || moduleIndex + 1,
-          name: module.name || module.moduleTitle,
-          active: module.active || false,
-          title: module.title || module.moduleTitle,
-          moduleNumber: module.moduleNumber || moduleIndex + 1,
-          moduleTitle: module.moduleTitle,
-          description: module.description || "",
-          topics: module.topics || [],
-          chapters: [],
-          contentItems: [],
-          resources: [],
-          lectures: [],
-          link: module.link || "",
-          isActive: true,
-          order: moduleIndex + 1,
-        };
-
-        // Process chapters if they exist in the module
-        if (module.chapters && Array.isArray(module.chapters)) {
-          logger.info(
-            `Processing ${module.chapters.length} chapters for module ${moduleData.moduleTitle}`
-          );
-
-          for (const [chapterIndex, chapter] of module.chapters.entries()) {
-            const chapterData = {
-              id: chapter.id || chapterIndex + 1,
-              title: chapter.title,
-              description: chapter.description || "",
-              color: chapter.color || "bg-blue-500",
-              articles: [],
-              // UPDATED: Include the new link field for chapters
-              link: chapter.link || [],
-              isActive:
-                chapter.isActive !== undefined ? chapter.isActive : true,
-              order: chapter.order || chapterIndex + 1,
-            };
-
-            // Process articles if they exist in the chapter
-            if (chapter.articles && Array.isArray(chapter.articles)) {
-              logger.info(
-                `Processing ${chapter.articles.length} articles for chapter ${chapterData.title}`
-              );
-
-              for (const [
-                articleIndex,
-                articleData,
-              ] of chapter.articles.entries()) {
-                // Create Article document
-                const article = new Article({
-                  title: articleData.title,
-                  content: articleData.content,
-                  author: articleData.author,
-                  time: articleData.time,
-                  chapter: null, // Will be set after chapter is created
-                  course: course._id,
-                  order: articleData.order || articleIndex + 1,
-                  image: parseImageField(articleData.image),
-                });
-
-                await article.save({ session });
-                chapterData.articles.push(article._id);
-                logger.info(
-                  `Created article: ${article.title} with ID: ${article._id}`
-                );
-              }
-            }
-
-            moduleData.chapters.push(chapterData);
-          }
-        }
-
-        modulesWithChapters.push(moduleData);
-      }
+      const modulesData = req.body.syllabus.modules.map((module, index) => ({
+        moduleNumber: module.moduleNumber || index + 1,
+        moduleTitle: module.moduleTitle || `Module ${index + 1}`,
+        description: module.description || "",
+        videos: module.videos || [],
+        links: module.links || [],
+        pdfs: module.pdfs || [],
+        ppts: module.ppts || [],
+        lectures: [],
+        isActive: true,
+        order: index + 1,
+      }));
 
       const syllabus = await CourseSyllabus.create(
         [
           {
-            modules: modulesWithChapters,
+            modules: modulesData,
             course: course._id,
           },
         ],
@@ -1013,22 +918,6 @@ const createCourse = async function (req, res) {
 
       course.syllabus = syllabus[0]._id;
       logger.info(`Course syllabus created with ID: ${syllabus[0]._id}`);
-
-      // Update all articles with their chapter references
-      for (const module of syllabus[0].modules) {
-        for (const chapter of module.chapters) {
-          if (chapter.articles && chapter.articles.length > 0) {
-            await Article.updateMany(
-              { _id: { $in: chapter.articles } },
-              { chapter: chapter._id },
-              { session }
-            );
-            logger.info(
-              `Updated ${chapter.articles.length} articles with chapter reference: ${chapter._id}`
-            );
-          }
-        }
-      }
     }
 
     // Create weekly plan
@@ -1089,13 +978,13 @@ const createCourse = async function (req, res) {
     teacher.courses.push(course._id);
     await teacher.save({ session });
 
-    // NEW: Find all students under this teacher with matching course code and add the course to their courses array
+    // Find all students under this teacher with matching course code and add the course to their courses array
     logger.info(
       `Finding students for teacher: ${teacher._id} with course code: ${normalizedCourseCode}`
     );
     const students = await Student.find({
       teacher: teacher._id,
-      courseCodes: normalizedCourseCode, // Only students with matching course code
+      courseCodes: normalizedCourseCode,
     }).session(session);
 
     // Add course ID to matching students' courses arrays
@@ -1161,7 +1050,7 @@ const createCourse = async function (req, res) {
   }
 };
 
-// Update course (simplified to use shared utilities) - UPDATED to handle course code changes
+// Update course (simplified)
 const updateCourse = async function (req, res) {
   logger.info(`Updating course ID: ${req.params.courseId}`);
 
@@ -1195,7 +1084,7 @@ const updateCourse = async function (req, res) {
 
     logger.info(`Found course: ${course.title} (${course.courseCode})`);
 
-    // NEW: Handle course code changes
+    // Handle course code changes
     if (req.body.courseCode) {
       const newCourseCode = req.body.courseCode.toUpperCase().trim();
 
@@ -1307,9 +1196,6 @@ const updateCourse = async function (req, res) {
         logger.info(`Created new schedule: ${schedule[0]._id}`);
       }
     }
-
-    // NOTE: Syllabus updates with articles should be handled by syllabusController
-    // to avoid duplicating complex logic here
 
     // Update weekly plan
     if (req.body.weeklyPlan) {
@@ -1424,7 +1310,7 @@ const updateCourse = async function (req, res) {
   }
 };
 
-// Delete course and all related data (updated to handle course code cleanup)
+// Delete course and all related data
 const deleteCourse = async function (req, res) {
   logger.info(`Deleting course ID: ${req.params.courseId}`);
 
@@ -1468,23 +1354,52 @@ const deleteCourse = async function (req, res) {
     }
 
     if (course.syllabus) {
-      // Delete all articles in the syllabus
+      // Delete syllabus content files from Azure
       const syllabus = await CourseSyllabus.findById(course.syllabus).session(
         session
       );
       if (syllabus) {
-        const articleIds = [];
+        const filesToDelete = [];
+
         syllabus.modules.forEach((module) => {
-          module.chapters.forEach((chapter) => {
-            articleIds.push(...chapter.articles);
-          });
+          // Collect video files
+          if (module.videos) {
+            module.videos.forEach((video) => {
+              if (video.fileKey) filesToDelete.push(video.fileKey);
+              if (video.thumbnail?.thumbnailKey)
+                filesToDelete.push(video.thumbnail.thumbnailKey);
+            });
+          }
+
+          // Collect PDF files
+          if (module.pdfs) {
+            module.pdfs.forEach((pdf) => {
+              if (pdf.fileKey) filesToDelete.push(pdf.fileKey);
+              if (pdf.thumbnail?.thumbnailKey)
+                filesToDelete.push(pdf.thumbnail.thumbnailKey);
+            });
+          }
+
+          // Collect PPT files
+          if (module.ppts) {
+            module.ppts.forEach((ppt) => {
+              if (ppt.fileKey) filesToDelete.push(ppt.fileKey);
+              if (ppt.thumbnail?.thumbnailKey)
+                filesToDelete.push(ppt.thumbnail.thumbnailKey);
+            });
+          }
         });
 
-        if (articleIds.length > 0) {
-          await Article.deleteMany({ _id: { $in: articleIds } }).session(
-            session
-          );
-          logger.info(`Deleted ${articleIds.length} articles`);
+        // Delete files from Azure
+        if (filesToDelete.length > 0) {
+          console.log(`Deleting ${filesToDelete.length} files from Azure`);
+          for (const fileKey of filesToDelete) {
+            try {
+              await deleteFileFromAzure(fileKey);
+            } catch (azureError) {
+              console.error("Error deleting file from Azure:", azureError);
+            }
+          }
         }
       }
 
@@ -1530,7 +1445,7 @@ const deleteCourse = async function (req, res) {
     await teacher.save({ session });
     logger.info(`Removed course from teacher's courses list`);
 
-    // NEW: Update students who have this course - remove it from their courses array
+    // Update students who have this course - remove it from their courses array
     const students = await Student.find({
       courses: course._id,
     }).session(session);
@@ -1578,7 +1493,7 @@ const deleteCourse = async function (req, res) {
   }
 };
 
-// Update attendance only (no changes needed)
+// Update attendance only
 const updateCourseAttendance = async function (req, res) {
   logger.info(`Updating attendance for course ID: ${req.params.courseId}`);
 
@@ -1654,7 +1569,7 @@ const updateCourseAttendance = async function (req, res) {
 
     res.json({
       _id: updatedCourse._id,
-      courseCode: updatedCourse.courseCode, // NEW: Include course code
+      courseCode: updatedCourse.courseCode,
       attendance: {
         sessions: attendanceSessions,
       },

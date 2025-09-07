@@ -36,14 +36,6 @@ router.put(
   syllabusController.updateModule
 );
 
-// Update module status (activate/deactivate)
-router.patch(
-  "/course/:courseId/syllabus/module/:moduleId/status",
-  auth,
-  checkRole(["teacher"]),
-  syllabusController.updateModuleStatus
-);
-
 // Delete a module
 router.delete(
   "/course/:courseId/syllabus/module/:moduleId",
@@ -52,39 +44,7 @@ router.delete(
   syllabusController.deleteModule
 );
 
-// Create a new chapter within a module
-router.post(
-  "/course/:courseId/syllabus/module/:moduleId/chapters",
-  auth,
-  checkRole(["teacher"]),
-  syllabusController.createChapter
-);
-
-// Update a chapter
-router.put(
-  "/course/:courseId/syllabus/module/:moduleId/chapter/:chapterId",
-  auth,
-  checkRole(["teacher"]),
-  syllabusController.updateChapter
-);
-
-// Delete a chapter
-router.delete(
-  "/course/:courseId/syllabus/module/:moduleId/chapter/:chapterId",
-  auth,
-  checkRole(["teacher"]),
-  syllabusController.deleteChapter
-);
-
-// Create a new article within a chapter
-router.post(
-  "/course/:courseId/syllabus/module/:moduleId/chapter/:chapterId/articles",
-  auth,
-  checkRole(["teacher"]),
-  syllabusController.createArticle
-);
-
-// Add content to module
+// Add content to module (PDF, PPT, Video, or Link)
 router.post(
   "/course/:courseId/syllabus/module/:moduleId/content",
   auth,
@@ -94,7 +54,7 @@ router.post(
 
 // Update content item
 router.put(
-  "/course/:courseId/syllabus/module/:moduleId/content/:contentId",
+  "/course/:courseId/syllabus/module/:moduleId/content/:contentType/:contentId",
   auth,
   checkRole(["teacher"]),
   syllabusController.updateContentItem
@@ -102,10 +62,18 @@ router.put(
 
 // Delete content item
 router.delete(
-  "/course/:courseId/syllabus/module/:moduleId/content/:contentId",
+  "/course/:courseId/syllabus/module/:moduleId/content/:contentType/:contentId",
   auth,
   checkRole(["teacher"]),
   syllabusController.deleteContentItem
+);
+
+// Update content order within a module
+router.put(
+  "/course/:courseId/syllabus/module/:moduleId/content/:contentType/reorder",
+  auth,
+  checkRole(["teacher"]),
+  syllabusController.updateContentOrder
 );
 
 module.exports = router;
