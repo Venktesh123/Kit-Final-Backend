@@ -1084,6 +1084,7 @@ const updateCourse = async function (req, res) {
 
     logger.info(`Found course: ${course.title} (${course.courseCode})`);
 
+    if (req.body.courseCode) {
       const newCourseCode = req.body.courseCode.toUpperCase().trim();
 
       // Check if teacher is authorized for the new course code

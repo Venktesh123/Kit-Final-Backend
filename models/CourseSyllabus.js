@@ -219,7 +219,7 @@ const pptContentSchema = new mongoose.Schema({
   },
 });
 
-// Simplified module schema with only required content types
+// Simplified module schema - ONLY lectures and content types (no chapters, articles, topics)
 const moduleSchema = new mongoose.Schema({
   moduleNumber: {
     type: Number,
@@ -234,7 +234,7 @@ const moduleSchema = new mongoose.Schema({
     default: "",
   },
 
-  // Only these content types are allowed
+  // ONLY these content types are allowed
   videos: [videoContentSchema],
   links: [linkContentSchema],
   pdfs: [pdfContentSchema],
