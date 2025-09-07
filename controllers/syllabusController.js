@@ -17,7 +17,7 @@ const handleFileUploads = async (files, allowedTypes, path, next) => {
   let filesArray = Array.isArray(files) ? files : [files];
   console.log(`Found ${filesArray.length} files`);
 
-  // Validate file types
+  // Validate file types and sizes
   for (const file of filesArray) {
     console.log(
       `Validating file: ${file.name}, type: ${file.mimetype}, size: ${file.size}`
@@ -26,21 +26,30 @@ const handleFileUploads = async (files, allowedTypes, path, next) => {
     if (!allowedTypes.includes(file.mimetype)) {
       console.log(`Invalid file type: ${file.mimetype}`);
       throw new ErrorHandler(
-        `Invalid file type. Allowed types: ${allowedTypes.join(", ")}`,
+        `Invalid file type for ${file.name}. Allowed types: ${allowedTypes.join(
+          ", "
+        )}`,
         400
       );
     }
 
     // Validate file size (50MB for videos, 10MB for others)
     const maxSize =
-      allowedTypes.includes("video/mp4") || allowedTypes.includes("video/webm")
+      allowedTypes.includes("video/mp4") ||
+      allowedTypes.includes("video/webm") ||
+      allowedTypes.includes("video/avi") ||
+      allowedTypes.includes("video/mov") ||
+      allowedTypes.includes("video/wmv") ||
+      allowedTypes.includes("video/ogg")
         ? 50 * 1024 * 1024 // 50MB for videos
         : 10 * 1024 * 1024; // 10MB for others
 
     if (file.size > maxSize) {
       console.log(`File too large: ${file.size} bytes`);
       throw new ErrorHandler(
-        `File too large. Maximum size allowed is ${maxSize / (1024 * 1024)}MB`,
+        `File ${file.name} is too large. Maximum size allowed is ${
+          maxSize / (1024 * 1024)
+        }MB`,
         400
       );
     }
@@ -48,9 +57,17 @@ const handleFileUploads = async (files, allowedTypes, path, next) => {
 
   // Upload files to Azure
   console.log("Starting file uploads to Azure");
-  const uploadPromises = filesArray.map((file) =>
-    uploadFileToAzure(file, path)
-  );
+  const uploadPromises = filesArray.map(async (file) => {
+    try {
+      return await uploadFileToAzure(file, path);
+    } catch (uploadError) {
+      console.error(`Failed to upload ${file.name}:`, uploadError);
+      throw new ErrorHandler(
+        `Failed to upload ${file.name}: ${uploadError.message}`,
+        500
+      );
+    }
+  });
 
   const uploadedFiles = await Promise.all(uploadPromises);
   console.log(`Successfully uploaded ${uploadedFiles.length} files`);
@@ -88,13 +105,55 @@ const handleThumbnailUpload = async (thumbnailFile, path) => {
     );
   }
 
-  const thumbnailPath = `${path}/thumbnails`;
-  const uploadResult = await uploadFileToAzure(thumbnailFile, thumbnailPath);
+  try {
+    const thumbnailPath = `${path}/thumbnails`;
+    const uploadResult = await uploadFileToAzure(thumbnailFile, thumbnailPath);
 
-  return {
-    thumbnailUrl: uploadResult.url,
-    thumbnailKey: uploadResult.key,
-  };
+    return {
+      thumbnailUrl: uploadResult.url,
+      thumbnailKey: uploadResult.key,
+    };
+  } catch (uploadError) {
+    console.error("Error uploading thumbnail:", uploadError);
+    throw new ErrorHandler(
+      `Failed to upload thumbnail: ${uploadError.message}`,
+      500
+    );
+  }
+};
+
+// Helper function to verify teacher access to course
+const verifyTeacherAccess = async (userId, courseId, session = null) => {
+  const teacher = await Teacher.findOne({ user: userId }).session(session);
+  if (!teacher) {
+    throw new ErrorHandler("Teacher not found", 404);
+  }
+
+  const course = await Course.findOne({
+    _id: courseId,
+    teacher: teacher._id,
+  }).session(session);
+
+  if (!course) {
+    throw new ErrorHandler("Course not found or unauthorized", 404);
+  }
+
+  return { teacher, course };
+};
+
+// Helper function to verify student access to course
+const verifyStudentAccess = async (userId, courseId) => {
+  const student = await Student.findOne({ user: userId });
+  if (!student) {
+    throw new ErrorHandler("Student not found", 404);
+  }
+
+  const isEnrolled = student.courses.some((id) => id.toString() === courseId);
+  if (!isEnrolled) {
+    throw new ErrorHandler("You are not enrolled in this course", 403);
+  }
+
+  return student;
 };
 
 // Get course syllabus with modules
@@ -113,37 +172,20 @@ exports.getCourseSyllabus = catchAsyncErrors(async (req, res, next) => {
 
   // Verify user access based on role
   if (req.user.role === "teacher") {
-    const teacher = await Teacher.findOne({ user: req.user.id });
-    if (!teacher) {
-      return next(new ErrorHandler("Teacher not found", 404));
-    }
-
-    const teacherCourse = await Course.findOne({
-      _id: courseId,
-      teacher: teacher._id,
-    });
-
-    if (!teacherCourse) {
-      return next(new ErrorHandler("Unauthorized access to this course", 403));
-    }
+    await verifyTeacherAccess(req.user.id, courseId);
   } else if (req.user.role === "student") {
-    const student = await Student.findOne({ user: req.user.id });
-    if (!student) {
-      return next(new ErrorHandler("Student not found", 404));
-    }
-
-    const isEnrolled = student.courses.some((id) => id.toString() === courseId);
-    if (!isEnrolled) {
-      return next(new ErrorHandler("You are not enrolled in this course", 403));
-    }
+    await verifyStudentAccess(req.user.id, courseId);
+  } else {
+    return next(new ErrorHandler("Invalid user role", 403));
   }
 
-  // Find CourseSyllabus
+  // Find CourseSyllabus with populated lectures
   const syllabus = await CourseSyllabus.findOne({ course: courseId }).populate({
     path: "modules.lectures",
     model: "Lecture",
     select:
       "title content videoUrl videoKey moduleNumber lectureOrder isReviewed reviewDeadline createdAt updatedAt",
+    options: { sort: { lectureOrder: 1 } }, // Sort lectures by order
   });
 
   if (!syllabus) {
@@ -187,12 +229,8 @@ exports.getCourseSyllabus = catchAsyncErrors(async (req, res, next) => {
         ? [...module.ppts].sort((a, b) => (a.order || 0) - (b.order || 0))
         : [],
 
-      // Sort lectures by order
-      lectures: module.lectures
-        ? [...module.lectures].sort(
-            (a, b) => (a.lectureOrder || 0) - (b.lectureOrder || 0)
-          )
-        : [],
+      // Lectures are already sorted from populate
+      lectures: module.lectures || [],
 
       // Content counts
       videoCount: module.videos ? module.videos.length : 0,
@@ -244,22 +282,15 @@ exports.createModule = catchAsyncErrors(async (req, res, next) => {
       );
     }
 
+    // Validate moduleNumber is a positive integer
+    if (!Number.isInteger(moduleNumber) || moduleNumber <= 0) {
+      return next(
+        new ErrorHandler("Module number must be a positive integer", 400)
+      );
+    }
+
     // Check if teacher is authorized
-    const teacher = await Teacher.findOne({ user: req.user.id });
-    if (!teacher) {
-      console.log("Teacher not found");
-      return next(new ErrorHandler("Teacher not found", 404));
-    }
-
-    const course = await Course.findOne({
-      _id: courseId,
-      teacher: teacher._id,
-    });
-
-    if (!course) {
-      console.log("Course not found or teacher not authorized");
-      return next(new ErrorHandler("Course not found or unauthorized", 404));
-    }
+    await verifyTeacherAccess(req.user.id, courseId, session);
 
     // Find or create syllabus
     let syllabus = await CourseSyllabus.findOne({ course: courseId }).session(
@@ -289,8 +320,8 @@ exports.createModule = catchAsyncErrors(async (req, res, next) => {
     // Create new module
     const newModule = {
       moduleNumber,
-      moduleTitle,
-      description: description || "",
+      moduleTitle: moduleTitle.trim(),
+      description: description ? description.trim() : "",
       videos: [],
       links: [],
       pdfs: [],
@@ -341,37 +372,20 @@ exports.getModuleById = catchAsyncErrors(async (req, res, next) => {
 
   // Verify user access
   if (req.user.role === "teacher") {
-    const teacher = await Teacher.findOne({ user: req.user.id });
-    if (!teacher) {
-      return next(new ErrorHandler("Teacher not found", 404));
-    }
-
-    const course = await Course.findOne({
-      _id: courseId,
-      teacher: teacher._id,
-    });
-
-    if (!course) {
-      return next(new ErrorHandler("Unauthorized access to this course", 403));
-    }
+    await verifyTeacherAccess(req.user.id, courseId);
   } else if (req.user.role === "student") {
-    const student = await Student.findOne({ user: req.user.id });
-    if (!student) {
-      return next(new ErrorHandler("Student not found", 404));
-    }
-
-    const isEnrolled = student.courses.some((id) => id.toString() === courseId);
-    if (!isEnrolled) {
-      return next(new ErrorHandler("You are not enrolled in this course", 403));
-    }
+    await verifyStudentAccess(req.user.id, courseId);
+  } else {
+    return next(new ErrorHandler("Invalid user role", 403));
   }
 
-  // Find CourseSyllabus
+  // Find CourseSyllabus with populated lectures
   const syllabus = await CourseSyllabus.findOne({ course: courseId }).populate({
     path: "modules.lectures",
     model: "Lecture",
     select:
       "title content videoUrl videoKey moduleNumber lectureOrder isReviewed reviewDeadline createdAt updatedAt",
+    options: { sort: { lectureOrder: 1 } },
   });
 
   if (!syllabus) {
@@ -409,12 +423,8 @@ exports.getModuleById = catchAsyncErrors(async (req, res, next) => {
       ? [...module.ppts].sort((a, b) => (a.order || 0) - (b.order || 0))
       : [],
 
-    // Sort lectures by order
-    lectures: module.lectures
-      ? [...module.lectures].sort(
-          (a, b) => (a.lectureOrder || 0) - (b.lectureOrder || 0)
-        )
-      : [],
+    // Lectures are already sorted from populate
+    lectures: module.lectures || [],
 
     // Content counts
     videoCount: module.videos ? module.videos.length : 0,
@@ -455,19 +465,7 @@ exports.updateModule = catchAsyncErrors(async (req, res, next) => {
     console.log(`Updating module ${moduleId} for course: ${courseId}`);
 
     // Check authorization
-    const teacher = await Teacher.findOne({ user: req.user.id });
-    if (!teacher) {
-      return next(new ErrorHandler("Teacher not found", 404));
-    }
-
-    const course = await Course.findOne({
-      _id: courseId,
-      teacher: teacher._id,
-    });
-
-    if (!course) {
-      return next(new ErrorHandler("Course not found or unauthorized", 404));
-    }
+    await verifyTeacherAccess(req.user.id, courseId, session);
 
     // Find and update module
     const syllabus = await CourseSyllabus.findOne({ course: courseId }).session(
@@ -484,6 +482,13 @@ exports.updateModule = catchAsyncErrors(async (req, res, next) => {
 
     // Check if new module number already exists (if changing)
     if (moduleNumber && moduleNumber !== module.moduleNumber) {
+      // Validate moduleNumber is a positive integer
+      if (!Number.isInteger(moduleNumber) || moduleNumber <= 0) {
+        return next(
+          new ErrorHandler("Module number must be a positive integer", 400)
+        );
+      }
+
       const existingModule = syllabus.modules.find(
         (m) => m.moduleNumber === moduleNumber && m._id.toString() !== moduleId
       );
@@ -499,8 +504,8 @@ exports.updateModule = catchAsyncErrors(async (req, res, next) => {
 
     // Update module details
     if (moduleNumber) module.moduleNumber = moduleNumber;
-    if (moduleTitle) module.moduleTitle = moduleTitle;
-    if (description !== undefined) module.description = description;
+    if (moduleTitle) module.moduleTitle = moduleTitle.trim();
+    if (description !== undefined) module.description = description.trim();
     if (isActive !== undefined) module.isActive = isActive;
 
     await syllabus.save({ session });
@@ -553,19 +558,7 @@ exports.deleteModule = catchAsyncErrors(async (req, res, next) => {
     console.log(`Deleting module ${moduleId} for course: ${courseId}`);
 
     // Check authorization
-    const teacher = await Teacher.findOne({ user: req.user.id });
-    if (!teacher) {
-      return next(new ErrorHandler("Teacher not found", 404));
-    }
-
-    const course = await Course.findOne({
-      _id: courseId,
-      teacher: teacher._id,
-    });
-
-    if (!course) {
-      return next(new ErrorHandler("Course not found or unauthorized", 404));
-    }
+    await verifyTeacherAccess(req.user.id, courseId, session);
 
     // Find syllabus and module
     const syllabus = await CourseSyllabus.findOne({ course: courseId }).session(
@@ -580,7 +573,7 @@ exports.deleteModule = catchAsyncErrors(async (req, res, next) => {
       return next(new ErrorHandler("Module not found", 404));
     }
 
-    // Delete all content files from Azure
+    // Collect all files to delete from Azure
     const filesToDelete = [];
 
     // Collect video files
@@ -618,16 +611,23 @@ exports.deleteModule = catchAsyncErrors(async (req, res, next) => {
       });
     }
 
-    // Delete files from Azure
+    // Delete files from Azure (do this before database transaction commit)
     if (filesToDelete.length > 0) {
       console.log(`Deleting ${filesToDelete.length} files from Azure`);
-      for (const fileKey of filesToDelete) {
+      const deletePromises = filesToDelete.map(async (fileKey) => {
         try {
           await deleteFileFromAzure(fileKey);
+          console.log(`Deleted file: ${fileKey}`);
         } catch (azureError) {
-          console.error("Error deleting file from Azure:", azureError);
+          console.error(
+            `Error deleting file ${fileKey} from Azure:`,
+            azureError
+          );
+          // Continue with other deletions
         }
-      }
+      });
+
+      await Promise.allSettled(deletePromises); // Use allSettled to continue even if some deletions fail
     }
 
     // Remove module from syllabus
@@ -644,6 +644,7 @@ exports.deleteModule = catchAsyncErrors(async (req, res, next) => {
       message: "Module deleted successfully",
       courseId: courseId,
       moduleId: moduleId,
+      deletedFiles: filesToDelete.length,
     });
   } catch (error) {
     console.log(`Error in deleteModule: ${error.message}`);
@@ -665,6 +666,7 @@ exports.addModuleContent = catchAsyncErrors(async (req, res, next) => {
   console.log("addModuleContent: Started");
   const session = await mongoose.startSession();
   let transactionStarted = false;
+  let uploadedFiles = []; // Track uploaded files for cleanup
 
   try {
     await session.startTransaction();
@@ -689,21 +691,7 @@ exports.addModuleContent = catchAsyncErrors(async (req, res, next) => {
     }
 
     // Check if teacher is authorized
-    const teacher = await Teacher.findOne({ user: req.user.id });
-    if (!teacher) {
-      console.log("Teacher not found");
-      return next(new ErrorHandler("Teacher not found", 404));
-    }
-
-    const course = await Course.findOne({
-      _id: courseId,
-      teacher: teacher._id,
-    });
-
-    if (!course) {
-      console.log("Course not found or teacher not authorized");
-      return next(new ErrorHandler("Course not found or unauthorized", 404));
-    }
+    await verifyTeacherAccess(req.user.id, courseId, session);
 
     // Find syllabus and module
     const syllabus = await CourseSyllabus.findOne({ course: courseId }).session(
@@ -728,8 +716,8 @@ exports.addModuleContent = catchAsyncErrors(async (req, res, next) => {
 
     // Create base content item
     const contentItem = {
-      name: name || "Untitled Content",
-      description: description || "",
+      name: name ? name.trim() : "Untitled Content",
+      description: description ? description.trim() : "",
       createDate: new Date(),
       isActive: true,
       thumbnail: {
@@ -748,15 +736,11 @@ exports.addModuleContent = catchAsyncErrors(async (req, res, next) => {
         );
         if (thumbnailResult) {
           contentItem.thumbnail = thumbnailResult;
+          uploadedFiles.push(thumbnailResult.thumbnailKey);
         }
       } catch (thumbnailError) {
         console.error("Error handling thumbnail upload:", thumbnailError);
-        return next(
-          new ErrorHandler(
-            thumbnailError.message || "Failed to upload thumbnail",
-            thumbnailError.statusCode || 500
-          )
-        );
+        return next(thumbnailError);
       }
     }
 
@@ -770,15 +754,17 @@ exports.addModuleContent = catchAsyncErrors(async (req, res, next) => {
 
         try {
           const allowedTypes = ["application/pdf"];
-          const { filesArray, uploadedFiles } = await handleFileUploads(
-            req.files.file,
-            allowedTypes,
-            "syllabus-pdfs",
-            next
-          );
+          const { filesArray, uploadedFiles: pdfFiles } =
+            await handleFileUploads(
+              req.files.file,
+              allowedTypes,
+              "syllabus-pdfs",
+              next
+            );
 
           const file = filesArray[0];
-          const uploadedFile = uploadedFiles[0];
+          const uploadedFile = pdfFiles[0];
+          uploadedFiles.push(uploadedFile.key);
 
           contentItem.fileUrl = uploadedFile.url;
           contentItem.fileKey = uploadedFile.key;
@@ -789,12 +775,7 @@ exports.addModuleContent = catchAsyncErrors(async (req, res, next) => {
           module.pdfs.push(contentItem);
         } catch (uploadError) {
           console.error("Error handling PDF upload:", uploadError);
-          return next(
-            new ErrorHandler(
-              uploadError.message || "Failed to upload PDF",
-              uploadError.statusCode || 500
-            )
-          );
+          return next(uploadError);
         }
         break;
 
@@ -809,15 +790,17 @@ exports.addModuleContent = catchAsyncErrors(async (req, res, next) => {
             "application/vnd.ms-powerpoint",
             "application/vnd.openxmlformats-officedocument.presentationml.presentation",
           ];
-          const { filesArray, uploadedFiles } = await handleFileUploads(
-            req.files.file,
-            allowedTypes,
-            "syllabus-ppts",
-            next
-          );
+          const { filesArray, uploadedFiles: pptFiles } =
+            await handleFileUploads(
+              req.files.file,
+              allowedTypes,
+              "syllabus-ppts",
+              next
+            );
 
           const file = filesArray[0];
-          const uploadedFile = uploadedFiles[0];
+          const uploadedFile = pptFiles[0];
+          uploadedFiles.push(uploadedFile.key);
 
           // Determine presentation type
           let presentationType = "pptx";
@@ -835,12 +818,7 @@ exports.addModuleContent = catchAsyncErrors(async (req, res, next) => {
           module.ppts.push(contentItem);
         } catch (uploadError) {
           console.error("Error handling PPT upload:", uploadError);
-          return next(
-            new ErrorHandler(
-              uploadError.message || "Failed to upload PPT",
-              uploadError.statusCode || 500
-            )
-          );
+          return next(uploadError);
         }
         break;
 
@@ -859,15 +837,17 @@ exports.addModuleContent = catchAsyncErrors(async (req, res, next) => {
             "video/mov",
             "video/wmv",
           ];
-          const { filesArray, uploadedFiles } = await handleFileUploads(
-            req.files.file,
-            allowedTypes,
-            "syllabus-videos",
-            next
-          );
+          const { filesArray, uploadedFiles: videoFiles } =
+            await handleFileUploads(
+              req.files.file,
+              allowedTypes,
+              "syllabus-videos",
+              next
+            );
 
           const file = filesArray[0];
-          const uploadedFile = uploadedFiles[0];
+          const uploadedFile = videoFiles[0];
+          uploadedFiles.push(uploadedFile.key);
 
           contentItem.fileUrl = uploadedFile.url;
           contentItem.fileKey = uploadedFile.key;
@@ -880,12 +860,7 @@ exports.addModuleContent = catchAsyncErrors(async (req, res, next) => {
           module.videos.push(contentItem);
         } catch (uploadError) {
           console.error("Error handling video upload:", uploadError);
-          return next(
-            new ErrorHandler(
-              uploadError.message || "Failed to upload video",
-              uploadError.statusCode || 500
-            )
-          );
+          return next(uploadError);
         }
         break;
 
@@ -928,6 +903,7 @@ exports.addModuleContent = catchAsyncErrors(async (req, res, next) => {
     });
   } catch (error) {
     console.log(`Error in addModuleContent: ${error.message}`);
+
     if (transactionStarted) {
       try {
         console.log("Aborting transaction");
@@ -937,6 +913,21 @@ exports.addModuleContent = catchAsyncErrors(async (req, res, next) => {
         console.error("Error aborting transaction:", abortError);
       }
     }
+
+    // Clean up uploaded files if transaction failed
+    if (uploadedFiles.length > 0) {
+      console.log(`Cleaning up ${uploadedFiles.length} uploaded files`);
+      const cleanupPromises = uploadedFiles.map(async (fileKey) => {
+        try {
+          await deleteFileFromAzure(fileKey);
+          console.log(`Cleaned up file: ${fileKey}`);
+        } catch (cleanupError) {
+          console.error(`Error cleaning up file ${fileKey}:`, cleanupError);
+        }
+      });
+      await Promise.allSettled(cleanupPromises);
+    }
+
     return next(new ErrorHandler(error.message, 500));
   } finally {
     console.log("Ending session");
@@ -950,6 +941,7 @@ exports.updateContentItem = catchAsyncErrors(async (req, res, next) => {
   console.log("updateContentItem: Started");
   const session = await mongoose.startSession();
   let transactionStarted = false;
+  let uploadedFiles = []; // Track new uploaded files for cleanup
 
   try {
     await session.startTransaction();
@@ -974,19 +966,7 @@ exports.updateContentItem = catchAsyncErrors(async (req, res, next) => {
     }
 
     // Check authorization
-    const teacher = await Teacher.findOne({ user: req.user.id });
-    if (!teacher) {
-      return next(new ErrorHandler("Teacher not found", 404));
-    }
-
-    const course = await Course.findOne({
-      _id: courseId,
-      teacher: teacher._id,
-    });
-
-    if (!course) {
-      return next(new ErrorHandler("Course not found or unauthorized", 404));
-    }
+    await verifyTeacherAccess(req.user.id, courseId, session);
 
     // Find syllabus and module
     const syllabus = await CourseSyllabus.findOne({ course: courseId }).session(
@@ -1037,46 +1017,28 @@ exports.updateContentItem = catchAsyncErrors(async (req, res, next) => {
     }
 
     const contentItem = contentArray[contentIndex];
+    const oldFileKey = contentItem.fileKey;
+    const oldThumbnailKey = contentItem.thumbnail?.thumbnailKey;
 
     // Update basic fields
-    if (name) contentItem.name = name;
-    if (description !== undefined) contentItem.description = description;
+    if (name) contentItem.name = name.trim();
+    if (description !== undefined) contentItem.description = description.trim();
 
     // Handle thumbnail update if provided
     if (req.files && req.files.thumbnail) {
       try {
         const thumbnailPath = `syllabus-thumbnails/course-${courseId}/module-${moduleId}`;
-
-        // Delete old thumbnail if exists
-        if (contentItem.thumbnail?.thumbnailKey) {
-          try {
-            await deleteFileFromAzure(contentItem.thumbnail.thumbnailKey);
-            console.log(
-              `Deleted old thumbnail: ${contentItem.thumbnail.thumbnailKey}`
-            );
-          } catch (azureError) {
-            console.error(
-              "Error deleting old thumbnail from Azure:",
-              azureError
-            );
-          }
-        }
-
         const thumbnailResult = await handleThumbnailUpload(
           req.files.thumbnail,
           thumbnailPath
         );
         if (thumbnailResult) {
+          uploadedFiles.push(thumbnailResult.thumbnailKey);
           contentItem.thumbnail = thumbnailResult;
         }
       } catch (thumbnailError) {
         console.error("Error handling thumbnail upload:", thumbnailError);
-        return next(
-          new ErrorHandler(
-            thumbnailError.message || "Failed to upload thumbnail",
-            thumbnailError.statusCode || 500
-          )
-        );
+        return next(thumbnailError);
       }
     }
 
@@ -1115,7 +1077,7 @@ exports.updateContentItem = catchAsyncErrors(async (req, res, next) => {
             break;
         }
 
-        const { filesArray, uploadedFiles } = await handleFileUploads(
+        const { filesArray, uploadedFiles: newFiles } = await handleFileUploads(
           req.files.file,
           allowedTypes,
           uploadPath,
@@ -1123,17 +1085,8 @@ exports.updateContentItem = catchAsyncErrors(async (req, res, next) => {
         );
 
         const file = filesArray[0];
-        const uploadedFile = uploadedFiles[0];
-
-        // Delete old file from Azure
-        if (contentItem.fileKey) {
-          try {
-            await deleteFileFromAzure(contentItem.fileKey);
-            console.log(`Deleted old file: ${contentItem.fileKey}`);
-          } catch (azureError) {
-            console.error("Error deleting old file from Azure:", azureError);
-          }
-        }
+        const uploadedFile = newFiles[0];
+        uploadedFiles.push(uploadedFile.key);
 
         // Update file properties
         contentItem.fileUrl = uploadedFile.url;
@@ -1152,12 +1105,7 @@ exports.updateContentItem = catchAsyncErrors(async (req, res, next) => {
         }
       } catch (uploadError) {
         console.error("Error handling file upload:", uploadError);
-        return next(
-          new ErrorHandler(
-            uploadError.message || "Failed to upload file",
-            uploadError.statusCode || 500
-          )
-        );
+        return next(uploadError);
       }
     }
 
@@ -1189,6 +1137,28 @@ exports.updateContentItem = catchAsyncErrors(async (req, res, next) => {
     transactionStarted = false;
     console.log("Transaction committed");
 
+    // Clean up old files after successful transaction
+    const filesToCleanup = [];
+    if (oldFileKey && uploadedFiles.some((key) => key !== oldFileKey)) {
+      filesToCleanup.push(oldFileKey);
+    }
+    if (oldThumbnailKey && req.files && req.files.thumbnail) {
+      filesToCleanup.push(oldThumbnailKey);
+    }
+
+    if (filesToCleanup.length > 0) {
+      console.log(`Cleaning up ${filesToCleanup.length} old files`);
+      const cleanupPromises = filesToCleanup.map(async (fileKey) => {
+        try {
+          await deleteFileFromAzure(fileKey);
+          console.log(`Cleaned up old file: ${fileKey}`);
+        } catch (deleteError) {
+          console.error(`Error deleting old file ${fileKey}:`, deleteError);
+        }
+      });
+      await Promise.allSettled(cleanupPromises);
+    }
+
     res.status(200).json({
       success: true,
       message: `${contentType.toUpperCase()} content updated successfully`,
@@ -1197,6 +1167,7 @@ exports.updateContentItem = catchAsyncErrors(async (req, res, next) => {
     });
   } catch (error) {
     console.log(`Error in updateContentItem: ${error.message}`);
+
     if (transactionStarted) {
       try {
         await session.abortTransaction();
@@ -1204,6 +1175,23 @@ exports.updateContentItem = catchAsyncErrors(async (req, res, next) => {
         console.error("Error aborting transaction:", abortError);
       }
     }
+
+    // Clean up newly uploaded files if transaction failed
+    if (uploadedFiles.length > 0) {
+      console.log(
+        `Cleaning up ${uploadedFiles.length} uploaded files due to error`
+      );
+      const cleanupPromises = uploadedFiles.map(async (fileKey) => {
+        try {
+          await deleteFileFromAzure(fileKey);
+          console.log(`Cleaned up file: ${fileKey}`);
+        } catch (cleanupError) {
+          console.error(`Error cleaning up file ${fileKey}:`, cleanupError);
+        }
+      });
+      await Promise.allSettled(cleanupPromises);
+    }
+
     return next(new ErrorHandler(error.message, 500));
   } finally {
     await session.endSession();
@@ -1238,19 +1226,7 @@ exports.deleteContentItem = catchAsyncErrors(async (req, res, next) => {
     }
 
     // Check authorization
-    const teacher = await Teacher.findOne({ user: req.user.id });
-    if (!teacher) {
-      return next(new ErrorHandler("Teacher not found", 404));
-    }
-
-    const course = await Course.findOne({
-      _id: courseId,
-      teacher: teacher._id,
-    });
-
-    if (!course) {
-      return next(new ErrorHandler("Course not found or unauthorized", 404));
-    }
+    await verifyTeacherAccess(req.user.id, courseId, session);
 
     // Find syllabus and module
     const syllabus = await CourseSyllabus.findOne({ course: courseId }).session(
@@ -1317,26 +1293,17 @@ exports.deleteContentItem = catchAsyncErrors(async (req, res, next) => {
       return next(new ErrorHandler("Content item not found", 404));
     }
 
-    // Delete file from Azure if it's a file-based content type
+    // Collect files to delete from Azure
+    const filesToDelete = [];
+
+    // Delete main file from Azure if it's a file-based content type
     if (["pdf", "ppt", "video"].includes(contentType) && contentItem.fileKey) {
-      try {
-        await deleteFileFromAzure(contentItem.fileKey);
-        console.log(`Deleted file from Azure: ${contentItem.fileKey}`);
-      } catch (azureError) {
-        console.error("Error deleting file from Azure:", azureError);
-      }
+      filesToDelete.push(contentItem.fileKey);
     }
 
     // Delete thumbnail if exists (for all content types)
     if (contentItem.thumbnail?.thumbnailKey) {
-      try {
-        await deleteFileFromAzure(contentItem.thumbnail.thumbnailKey);
-        console.log(
-          `Deleted thumbnail from Azure: ${contentItem.thumbnail.thumbnailKey}`
-        );
-      } catch (azureError) {
-        console.error("Error deleting thumbnail from Azure:", azureError);
-      }
+      filesToDelete.push(contentItem.thumbnail.thumbnailKey);
     }
 
     console.log("Saving updated syllabus");
@@ -1348,6 +1315,23 @@ exports.deleteContentItem = catchAsyncErrors(async (req, res, next) => {
     transactionStarted = false;
     console.log("Transaction committed");
 
+    // Delete files from Azure after successful database transaction
+    if (filesToDelete.length > 0) {
+      console.log(`Deleting ${filesToDelete.length} files from Azure`);
+      const deletePromises = filesToDelete.map(async (fileKey) => {
+        try {
+          await deleteFileFromAzure(fileKey);
+          console.log(`Deleted file from Azure: ${fileKey}`);
+        } catch (azureError) {
+          console.error(
+            `Error deleting file ${fileKey} from Azure:`,
+            azureError
+          );
+        }
+      });
+      await Promise.allSettled(deletePromises);
+    }
+
     res.status(200).json({
       success: true,
       message: `${contentType.toUpperCase()} content deleted successfully`,
@@ -1355,6 +1339,7 @@ exports.deleteContentItem = catchAsyncErrors(async (req, res, next) => {
       moduleId: moduleId,
       contentType: contentType,
       contentId: contentId,
+      deletedFiles: filesToDelete.length,
     });
   } catch (error) {
     console.log(`Error in deleteContentItem: ${error.message}`);
@@ -1399,19 +1384,7 @@ exports.updateContentOrder = catchAsyncErrors(async (req, res, next) => {
     }
 
     // Check authorization
-    const teacher = await Teacher.findOne({ user: req.user.id });
-    if (!teacher) {
-      return next(new ErrorHandler("Teacher not found", 404));
-    }
-
-    const course = await Course.findOne({
-      _id: courseId,
-      teacher: teacher._id,
-    });
-
-    if (!course) {
-      return next(new ErrorHandler("Course not found or unauthorized", 404));
-    }
+    await verifyTeacherAccess(req.user.id, courseId, session);
 
     // Find syllabus and module
     const syllabus = await CourseSyllabus.findOne({ course: courseId }).session(
@@ -1448,7 +1421,7 @@ exports.updateContentOrder = catchAsyncErrors(async (req, res, next) => {
       const contentIndex = contentArray.findIndex(
         (item) => item._id.toString() === contentId
       );
-      if (contentIndex !== -1) {
+      if (contentIndex !== -1 && Number.isInteger(order) && order > 0) {
         contentArray[contentIndex].order = order;
       }
     });
@@ -1498,29 +1471,11 @@ exports.getContentItemById = catchAsyncErrors(async (req, res, next) => {
 
   // Verify user access
   if (req.user.role === "teacher") {
-    const teacher = await Teacher.findOne({ user: req.user.id });
-    if (!teacher) {
-      return next(new ErrorHandler("Teacher not found", 404));
-    }
-
-    const course = await Course.findOne({
-      _id: courseId,
-      teacher: teacher._id,
-    });
-
-    if (!course) {
-      return next(new ErrorHandler("Unauthorized access to this course", 403));
-    }
+    await verifyTeacherAccess(req.user.id, courseId);
   } else if (req.user.role === "student") {
-    const student = await Student.findOne({ user: req.user.id });
-    if (!student) {
-      return next(new ErrorHandler("Student not found", 404));
-    }
-
-    const isEnrolled = student.courses.some((id) => id.toString() === courseId);
-    if (!isEnrolled) {
-      return next(new ErrorHandler("You are not enrolled in this course", 403));
-    }
+    await verifyStudentAccess(req.user.id, courseId);
+  } else {
+    return next(new ErrorHandler("Invalid user role", 403));
   }
 
   // Find syllabus and module
@@ -1584,6 +1539,7 @@ exports.bulkUploadContent = catchAsyncErrors(async (req, res, next) => {
   console.log("bulkUploadContent: Started");
   const session = await mongoose.startSession();
   let transactionStarted = false;
+  let uploadedFiles = []; // Track uploaded files for cleanup
 
   try {
     await session.startTransaction();
@@ -1608,21 +1564,7 @@ exports.bulkUploadContent = catchAsyncErrors(async (req, res, next) => {
     }
 
     // Check if teacher is authorized
-    const teacher = await Teacher.findOne({ user: req.user.id });
-    if (!teacher) {
-      console.log("Teacher not found");
-      return next(new ErrorHandler("Teacher not found", 404));
-    }
-
-    const course = await Course.findOne({
-      _id: courseId,
-      teacher: teacher._id,
-    });
-
-    if (!course) {
-      console.log("Course not found or teacher not authorized");
-      return next(new ErrorHandler("Course not found or unauthorized", 404));
-    }
+    await verifyTeacherAccess(req.user.id, courseId, session);
 
     // Find syllabus and module
     const syllabus = await CourseSyllabus.findOne({ course: courseId }).session(
@@ -1682,6 +1624,7 @@ exports.bulkUploadContent = catchAsyncErrors(async (req, res, next) => {
     }
 
     const uploadedContentItems = [];
+    const skippedFiles = [];
 
     // Process each file
     for (let i = 0; i < files.length; i++) {
@@ -1693,11 +1636,32 @@ exports.bulkUploadContent = catchAsyncErrors(async (req, res, next) => {
           console.log(
             `Skipping file ${file.name} - invalid type: ${file.mimetype}`
           );
+          skippedFiles.push({
+            name: file.name,
+            reason: `Invalid file type: ${file.mimetype}`,
+          });
+          continue;
+        }
+
+        // Validate file size
+        const maxSize =
+          contentType === "video" ? 50 * 1024 * 1024 : 10 * 1024 * 1024;
+        if (file.size > maxSize) {
+          console.log(
+            `Skipping file ${file.name} - too large: ${file.size} bytes`
+          );
+          skippedFiles.push({
+            name: file.name,
+            reason: `File too large: ${(file.size / (1024 * 1024)).toFixed(
+              2
+            )}MB`,
+          });
           continue;
         }
 
         // Upload file to Azure
         const uploadResult = await uploadFileToAzure(file, uploadPath);
+        uploadedFiles.push(uploadResult.key);
 
         // Create content item
         const contentItem = {
@@ -1728,16 +1692,16 @@ exports.bulkUploadContent = catchAsyncErrors(async (req, res, next) => {
         // Set order based on current content count
         switch (contentType) {
           case "pdf":
-            contentItem.order = module.pdfs.length + i + 1;
-            module.pdfs.push(contentItem);
+            contentItem.order =
+              module.pdfs.length + uploadedContentItems.length + 1;
             break;
           case "ppt":
-            contentItem.order = module.ppts.length + i + 1;
-            module.ppts.push(contentItem);
+            contentItem.order =
+              module.ppts.length + uploadedContentItems.length + 1;
             break;
           case "video":
-            contentItem.order = module.videos.length + i + 1;
-            module.videos.push(contentItem);
+            contentItem.order =
+              module.videos.length + uploadedContentItems.length + 1;
             break;
         }
 
@@ -1745,12 +1709,28 @@ exports.bulkUploadContent = catchAsyncErrors(async (req, res, next) => {
         console.log(`Successfully processed file: ${file.name}`);
       } catch (fileError) {
         console.error(`Error processing file ${file.name}:`, fileError);
-        // Continue with other files instead of failing the entire operation
+        skippedFiles.push({
+          name: file.name,
+          reason: `Processing error: ${fileError.message}`,
+        });
       }
     }
 
     if (uploadedContentItems.length === 0) {
       return next(new ErrorHandler("No valid files were uploaded", 400));
+    }
+
+    // Add all successfully processed items to the module
+    switch (contentType) {
+      case "pdf":
+        module.pdfs.push(...uploadedContentItems);
+        break;
+      case "ppt":
+        module.ppts.push(...uploadedContentItems);
+        break;
+      case "video":
+        module.videos.push(...uploadedContentItems);
+        break;
     }
 
     console.log("Saving updated syllabus");
@@ -1768,10 +1748,13 @@ exports.bulkUploadContent = catchAsyncErrors(async (req, res, next) => {
       contentType,
       uploadedCount: uploadedContentItems.length,
       totalFiles: files.length,
+      skippedCount: skippedFiles.length,
       uploadedItems: uploadedContentItems,
+      skippedFiles: skippedFiles,
     });
   } catch (error) {
     console.log(`Error in bulkUploadContent: ${error.message}`);
+
     if (transactionStarted) {
       try {
         console.log("Aborting transaction");
@@ -1781,6 +1764,23 @@ exports.bulkUploadContent = catchAsyncErrors(async (req, res, next) => {
         console.error("Error aborting transaction:", abortError);
       }
     }
+
+    // Clean up uploaded files if transaction failed
+    if (uploadedFiles.length > 0) {
+      console.log(
+        `Cleaning up ${uploadedFiles.length} uploaded files due to error`
+      );
+      const cleanupPromises = uploadedFiles.map(async (fileKey) => {
+        try {
+          await deleteFileFromAzure(fileKey);
+          console.log(`Cleaned up file: ${fileKey}`);
+        } catch (cleanupError) {
+          console.error(`Error cleaning up file ${fileKey}:`, cleanupError);
+        }
+      });
+      await Promise.allSettled(cleanupPromises);
+    }
+
     return next(new ErrorHandler(error.message, 500));
   } finally {
     console.log("Ending session");
