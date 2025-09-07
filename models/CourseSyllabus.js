@@ -1,14 +1,8 @@
-// models/CourseSyllabus.js (Updated)
 const mongoose = require("mongoose");
 
-// Content Item Schema for different types of content
-const contentItemSchema = new mongoose.Schema({
-  type: {
-    type: String,
-    enum: ["file", "link", "video", "text"],
-    required: true,
-  },
-  title: {
+// Enhanced content schemas for different types with thumbnails
+const videoContentSchema = new mongoose.Schema({
+  name: {
     type: String,
     required: true,
   },
@@ -16,124 +10,116 @@ const contentItemSchema = new mongoose.Schema({
     type: String,
     default: "",
   },
-  // For file type
-  fileType: {
-    type: String,
-    enum: ["pdf", "presentation", "document", "image", "other"],
-    required: function () {
-      return this.type === "file";
+  thumbnail: {
+    thumbnailUrl: {
+      type: String,
+      default: "",
+    },
+    thumbnailKey: {
+      type: String,
+      default: "",
     },
   },
   fileUrl: {
     type: String,
-    required: function () {
-      return this.type === "file";
-    },
+    required: true,
   },
   fileKey: {
     type: String,
-    required: function () {
-      return this.type === "file";
-    },
+    required: true,
   },
   fileName: {
     type: String,
-    required: function () {
-      return this.type === "file";
-    },
+    required: true,
   },
-  // For link type
-  url: {
-    type: String,
-    required: function () {
-      return this.type === "link";
-    },
-  },
-  // For video type
-  videoUrl: {
-    type: String,
-    required: function () {
-      return this.type === "video";
-    },
-  },
-  videoKey: {
-    type: String,
-  },
-  videoProvider: {
-    type: String,
-    enum: ["youtube", "vimeo", "other"],
-    default: "other",
-    required: function () {
-      return this.type === "video";
-    },
-  },
-  // For text type
-  content: {
-    type: String,
-    required: function () {
-      return this.type === "text";
-    },
-  },
-  // Common fields
-  order: {
-    type: Number,
-    default: 0,
+  createDate: {
+    type: Date,
+    default: Date.now,
   },
   isActive: {
     type: Boolean,
     default: true,
   },
-  createdAt: {
-    type: Date,
-    default: Date.now,
+  duration: {
+    type: String, // e.g., "10:30" for 10 minutes 30 seconds
+    default: "",
   },
-  updatedAt: {
-    type: Date,
-    default: Date.now,
+  videoSize: {
+    type: Number, // File size in bytes
+  },
+  videoQuality: {
+    type: String,
+    enum: ["HD", "SD", "4K", "auto"],
+    default: "auto",
   },
 });
 
-// Chapter Schema (UPDATED with link field)
-const chapterSchema = new mongoose.Schema({
-  id: {
-    type: Number,
-    required: true,
-  },
-  title: {
+const linkContentSchema = new mongoose.Schema({
+  name: {
     type: String,
     required: true,
   },
   description: {
     type: String,
-    required: true,
+    default: "",
   },
-  color: {
-    type: String,
-    default: "bg-blue-500",
-  },
-  articles: [
-    {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Article",
+  thumbnail: {
+    thumbnailUrl: {
+      type: String,
+      default: "",
     },
-  ],
-  // NEW: Array of links for the chapter
-  link: [{ type: String }],
+    thumbnailKey: {
+      type: String,
+      default: "",
+    },
+  },
+  fileUrl: {
+    type: String,
+    required: true,
+    validate: {
+      validator: function (v) {
+        return /^https?:\/\/.+/.test(v);
+      },
+      message: "Link must be a valid URL",
+    },
+  },
+  createDate: {
+    type: Date,
+    default: Date.now,
+  },
   isActive: {
     type: Boolean,
     default: true,
   },
-  order: {
-    type: Number,
-    default: 0,
+  linkType: {
+    type: String,
+    enum: ["external", "youtube", "vimeo", "article", "resource", "other"],
+    default: "external",
+  },
+  isExternal: {
+    type: Boolean,
+    default: true,
   },
 });
 
-const resourceSchema = new mongoose.Schema({
-  fileType: {
+const pdfContentSchema = new mongoose.Schema({
+  name: {
     type: String,
-    enum: ["pdf", "ppt", "pptx", "other"],
     required: true,
+  },
+  description: {
+    type: String,
+    default: "",
+  },
+  thumbnail: {
+    thumbnailUrl: {
+      type: String,
+      default: "",
+    },
+    thumbnailKey: {
+      type: String,
+      default: "",
+    },
   },
   fileUrl: {
     type: String,
@@ -147,29 +133,78 @@ const resourceSchema = new mongoose.Schema({
     type: String,
     required: true,
   },
-  uploadDate: {
+  createDate: {
     type: Date,
     default: Date.now,
   },
+  isActive: {
+    type: Boolean,
+    default: true,
+  },
+  fileSize: {
+    type: Number, // File size in bytes
+  },
+  pageCount: {
+    type: Number,
+    default: 0,
+  },
 });
 
-const moduleSchema = new mongoose.Schema({
-  id: {
-    type: Number,
-    required: true,
-  },
+const pptContentSchema = new mongoose.Schema({
   name: {
     type: String,
     required: true,
   },
-  active: {
-    type: Boolean,
-    default: false,
+  description: {
+    type: String,
+    default: "",
   },
-  title: {
+  thumbnail: {
+    thumbnailUrl: {
+      type: String,
+      default: "",
+    },
+    thumbnailKey: {
+      type: String,
+      default: "",
+    },
+  },
+  fileUrl: {
     type: String,
     required: true,
   },
+  fileKey: {
+    type: String,
+    required: true,
+  },
+  fileName: {
+    type: String,
+    required: true,
+  },
+  createDate: {
+    type: Date,
+    default: Date.now,
+  },
+  isActive: {
+    type: Boolean,
+    default: true,
+  },
+  fileSize: {
+    type: Number, // File size in bytes
+  },
+  slideCount: {
+    type: Number,
+    default: 0,
+  },
+  presentationType: {
+    type: String,
+    enum: ["ppt", "pptx", "odp"],
+    default: "pptx",
+  },
+});
+
+// Enhanced module schema with separate content arrays
+const moduleSchema = new mongoose.Schema({
   moduleNumber: {
     type: Number,
     required: true,
@@ -185,24 +220,76 @@ const moduleSchema = new mongoose.Schema({
   topics: [
     {
       type: String,
+      required: true,
     },
   ],
-  // Chapters array with updated schema
-  chapters: [chapterSchema],
 
-  // For backward compatibility
+  // Separate arrays for different content types
+  videos: [videoContentSchema],
+  links: [linkContentSchema],
+  pdfs: [pdfContentSchema],
+  ppts: [pptContentSchema],
+
+  // For backward compatibility - keep existing fields but deprecate
   link: {
     type: String,
     default: "",
   },
-  resources: [resourceSchema],
-  contentItems: [contentItemSchema],
+  resources: [
+    {
+      fileType: {
+        type: String,
+        enum: ["pdf", "ppt", "pptx", "other"],
+        required: true,
+      },
+      fileUrl: {
+        type: String,
+        required: true,
+      },
+      fileKey: {
+        type: String,
+        required: true,
+      },
+      fileName: {
+        type: String,
+        required: true,
+      },
+      uploadDate: {
+        type: Date,
+        default: Date.now,
+      },
+    },
+  ],
+
+  // Existing content items field for backward compatibility
+  contentItems: [
+    {
+      type: {
+        type: String,
+        enum: ["file", "link", "video", "text"],
+        required: true,
+      },
+      title: {
+        type: String,
+        required: true,
+      },
+      description: {
+        type: String,
+        default: "",
+      },
+      // ... other contentItem fields as before
+    },
+  ],
+
+  // Lectures for this module
   lectures: [
     {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Lecture",
     },
   ],
+
+  // Module status and ordering
   isActive: {
     type: Boolean,
     default: true,
@@ -211,6 +298,20 @@ const moduleSchema = new mongoose.Schema({
     type: Number,
     default: 0,
   },
+  createdAt: {
+    type: Date,
+    default: Date.now,
+  },
+  updatedAt: {
+    type: Date,
+    default: Date.now,
+  },
+});
+
+// Update the updatedAt field before saving
+moduleSchema.pre("save", function (next) {
+  this.updatedAt = new Date();
+  next();
 });
 
 const courseSyllabusSchema = new mongoose.Schema(
