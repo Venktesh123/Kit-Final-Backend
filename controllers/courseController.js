@@ -119,7 +119,7 @@ const formatCourseData = async (course) => {
             isActive: module.isActive,
             order: module.order,
 
-            // Simplified content types only
+            // Only allowed content types
             videos: module.videos
               ? [...module.videos].sort(
                   (a, b) => (a.order || 0) - (b.order || 0)
@@ -1084,8 +1084,6 @@ const updateCourse = async function (req, res) {
 
     logger.info(`Found course: ${course.title} (${course.courseCode})`);
 
-    // Handle course code changes
-    if (req.body.courseCode) {
       const newCourseCode = req.body.courseCode.toUpperCase().trim();
 
       // Check if teacher is authorized for the new course code
@@ -1386,6 +1384,14 @@ const deleteCourse = async function (req, res) {
               if (ppt.fileKey) filesToDelete.push(ppt.fileKey);
               if (ppt.thumbnail?.thumbnailKey)
                 filesToDelete.push(ppt.thumbnail.thumbnailKey);
+            });
+          }
+
+          // Collect link thumbnails
+          if (module.links) {
+            module.links.forEach((link) => {
+              if (link.thumbnail?.thumbnailKey)
+                filesToDelete.push(link.thumbnail.thumbnailKey);
             });
           }
         });

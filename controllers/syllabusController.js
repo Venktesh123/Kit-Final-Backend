@@ -10,7 +10,7 @@ const {
   deleteFileFromAzure,
 } = require("../utils/azureConfig");
 
-// Function to handle file uploads
+// Function to handle file uploads (for content files)
 const handleFileUploads = async (files, allowedTypes, path, next) => {
   console.log("Processing file uploads");
 
@@ -31,11 +31,16 @@ const handleFileUploads = async (files, allowedTypes, path, next) => {
       );
     }
 
-    // Validate file size (10MB)
-    if (file.size > 10 * 1024 * 1024) {
+    // Validate file size (50MB for videos, 10MB for others)
+    const maxSize =
+      allowedTypes.includes("video/mp4") || allowedTypes.includes("video/webm")
+        ? 50 * 1024 * 1024 // 50MB for videos
+        : 10 * 1024 * 1024; // 10MB for others
+
+    if (file.size > maxSize) {
       console.log(`File too large: ${file.size} bytes`);
       throw new ErrorHandler(
-        `File too large. Maximum size allowed is 10MB`,
+        `File too large. Maximum size allowed is ${maxSize / (1024 * 1024)}MB`,
         400
       );
     }
@@ -51,6 +56,45 @@ const handleFileUploads = async (files, allowedTypes, path, next) => {
   console.log(`Successfully uploaded ${uploadedFiles.length} files`);
 
   return { filesArray, uploadedFiles };
+};
+
+// Function to handle thumbnail uploads
+const handleThumbnailUpload = async (thumbnailFile, path) => {
+  if (!thumbnailFile) return null;
+
+  console.log("Processing thumbnail upload");
+
+  // Validate thumbnail file type
+  const allowedThumbnailTypes = [
+    "image/jpeg",
+    "image/png",
+    "image/jpg",
+    "image/gif",
+    "image/webp",
+  ];
+
+  if (!allowedThumbnailTypes.includes(thumbnailFile.mimetype)) {
+    throw new ErrorHandler(
+      "Invalid thumbnail file type. Allowed types: JPG, PNG, GIF, WEBP",
+      400
+    );
+  }
+
+  // Validate thumbnail file size (5MB)
+  if (thumbnailFile.size > 5 * 1024 * 1024) {
+    throw new ErrorHandler(
+      "Thumbnail file too large. Maximum size allowed is 5MB",
+      400
+    );
+  }
+
+  const thumbnailPath = `${path}/thumbnails`;
+  const uploadResult = await uploadFileToAzure(thumbnailFile, thumbnailPath);
+
+  return {
+    thumbnailUrl: uploadResult.url,
+    thumbnailKey: uploadResult.key,
+  };
 };
 
 // Get course syllabus with modules
@@ -566,6 +610,14 @@ exports.deleteModule = catchAsyncErrors(async (req, res, next) => {
       });
     }
 
+    // Collect link thumbnails
+    if (module.links) {
+      module.links.forEach((link) => {
+        if (link.thumbnail?.thumbnailKey)
+          filesToDelete.push(link.thumbnail.thumbnailKey);
+      });
+    }
+
     // Delete files from Azure
     if (filesToDelete.length > 0) {
       console.log(`Deleting ${filesToDelete.length} files from Azure`);
@@ -686,6 +738,28 @@ exports.addModuleContent = catchAsyncErrors(async (req, res, next) => {
       },
     };
 
+    // Handle thumbnail upload if provided
+    if (req.files && req.files.thumbnail) {
+      try {
+        const thumbnailPath = `syllabus-thumbnails/course-${courseId}/module-${moduleId}`;
+        const thumbnailResult = await handleThumbnailUpload(
+          req.files.thumbnail,
+          thumbnailPath
+        );
+        if (thumbnailResult) {
+          contentItem.thumbnail = thumbnailResult;
+        }
+      } catch (thumbnailError) {
+        console.error("Error handling thumbnail upload:", thumbnailError);
+        return next(
+          new ErrorHandler(
+            thumbnailError.message || "Failed to upload thumbnail",
+            thumbnailError.statusCode || 500
+          )
+        );
+      }
+    }
+
     // Process content based on type
     switch (contentType) {
       case "pdf":
@@ -782,6 +856,8 @@ exports.addModuleContent = catchAsyncErrors(async (req, res, next) => {
             "video/webm",
             "video/ogg",
             "video/avi",
+            "video/mov",
+            "video/wmv",
           ];
           const { filesArray, uploadedFiles } = await handleFileUploads(
             req.files.file,
@@ -966,6 +1042,44 @@ exports.updateContentItem = catchAsyncErrors(async (req, res, next) => {
     if (name) contentItem.name = name;
     if (description !== undefined) contentItem.description = description;
 
+    // Handle thumbnail update if provided
+    if (req.files && req.files.thumbnail) {
+      try {
+        const thumbnailPath = `syllabus-thumbnails/course-${courseId}/module-${moduleId}`;
+
+        // Delete old thumbnail if exists
+        if (contentItem.thumbnail?.thumbnailKey) {
+          try {
+            await deleteFileFromAzure(contentItem.thumbnail.thumbnailKey);
+            console.log(
+              `Deleted old thumbnail: ${contentItem.thumbnail.thumbnailKey}`
+            );
+          } catch (azureError) {
+            console.error(
+              "Error deleting old thumbnail from Azure:",
+              azureError
+            );
+          }
+        }
+
+        const thumbnailResult = await handleThumbnailUpload(
+          req.files.thumbnail,
+          thumbnailPath
+        );
+        if (thumbnailResult) {
+          contentItem.thumbnail = thumbnailResult;
+        }
+      } catch (thumbnailError) {
+        console.error("Error handling thumbnail upload:", thumbnailError);
+        return next(
+          new ErrorHandler(
+            thumbnailError.message || "Failed to upload thumbnail",
+            thumbnailError.statusCode || 500
+          )
+        );
+      }
+    }
+
     // Handle file replacement for file-based content types
     if (
       ["pdf", "ppt", "video"].includes(contentType) &&
@@ -994,6 +1108,8 @@ exports.updateContentItem = catchAsyncErrors(async (req, res, next) => {
               "video/webm",
               "video/ogg",
               "video/avi",
+              "video/mov",
+              "video/wmv",
             ];
             uploadPath = "syllabus-videos";
             break;
@@ -1209,17 +1325,17 @@ exports.deleteContentItem = catchAsyncErrors(async (req, res, next) => {
       } catch (azureError) {
         console.error("Error deleting file from Azure:", azureError);
       }
+    }
 
-      // Also delete thumbnail if exists
-      if (contentItem.thumbnail?.thumbnailKey) {
-        try {
-          await deleteFileFromAzure(contentItem.thumbnail.thumbnailKey);
-          console.log(
-            `Deleted thumbnail from Azure: ${contentItem.thumbnail.thumbnailKey}`
-          );
-        } catch (azureError) {
-          console.error("Error deleting thumbnail from Azure:", azureError);
-        }
+    // Delete thumbnail if exists (for all content types)
+    if (contentItem.thumbnail?.thumbnailKey) {
+      try {
+        await deleteFileFromAzure(contentItem.thumbnail.thumbnailKey);
+        console.log(
+          `Deleted thumbnail from Azure: ${contentItem.thumbnail.thumbnailKey}`
+        );
+      } catch (azureError) {
+        console.error("Error deleting thumbnail from Azure:", azureError);
       }
     }
 
@@ -1358,6 +1474,318 @@ exports.updateContentOrder = catchAsyncErrors(async (req, res, next) => {
     return next(new ErrorHandler(error.message, 500));
   } finally {
     await session.endSession();
+  }
+});
+
+// Get content item by ID
+exports.getContentItemById = catchAsyncErrors(async (req, res, next) => {
+  console.log("getContentItemById: Started");
+  const { courseId, moduleId, contentType, contentId } = req.params;
+
+  console.log(
+    `Fetching ${contentType} content ${contentId} from module ${moduleId} for course: ${courseId}`
+  );
+
+  // Validate content type
+  if (!["pdf", "ppt", "video", "link"].includes(contentType)) {
+    return next(
+      new ErrorHandler(
+        "Invalid content type. Must be pdf, ppt, video, or link",
+        400
+      )
+    );
+  }
+
+  // Verify user access
+  if (req.user.role === "teacher") {
+    const teacher = await Teacher.findOne({ user: req.user.id });
+    if (!teacher) {
+      return next(new ErrorHandler("Teacher not found", 404));
+    }
+
+    const course = await Course.findOne({
+      _id: courseId,
+      teacher: teacher._id,
+    });
+
+    if (!course) {
+      return next(new ErrorHandler("Unauthorized access to this course", 403));
+    }
+  } else if (req.user.role === "student") {
+    const student = await Student.findOne({ user: req.user.id });
+    if (!student) {
+      return next(new ErrorHandler("Student not found", 404));
+    }
+
+    const isEnrolled = student.courses.some((id) => id.toString() === courseId);
+    if (!isEnrolled) {
+      return next(new ErrorHandler("You are not enrolled in this course", 403));
+    }
+  }
+
+  // Find syllabus and module
+  const syllabus = await CourseSyllabus.findOne({ course: courseId });
+  if (!syllabus) {
+    return next(new ErrorHandler("Course syllabus not found", 404));
+  }
+
+  const module = syllabus.modules.id(moduleId);
+  if (!module) {
+    return next(new ErrorHandler("Module not found", 404));
+  }
+
+  // Find content item based on type
+  let contentArray = [];
+  let contentItem = null;
+
+  switch (contentType) {
+    case "pdf":
+      contentArray = module.pdfs || [];
+      contentItem = contentArray.find(
+        (item) => item._id.toString() === contentId
+      );
+      break;
+    case "ppt":
+      contentArray = module.ppts || [];
+      contentItem = contentArray.find(
+        (item) => item._id.toString() === contentId
+      );
+      break;
+    case "video":
+      contentArray = module.videos || [];
+      contentItem = contentArray.find(
+        (item) => item._id.toString() === contentId
+      );
+      break;
+    case "link":
+      contentArray = module.links || [];
+      contentItem = contentArray.find(
+        (item) => item._id.toString() === contentId
+      );
+      break;
+  }
+
+  if (!contentItem) {
+    return next(new ErrorHandler("Content item not found", 404));
+  }
+
+  res.status(200).json({
+    success: true,
+    courseId: courseId,
+    moduleId: moduleId,
+    contentType: contentType,
+    contentId: contentId,
+    contentItem: contentItem,
+  });
+});
+
+// Bulk upload content to module
+exports.bulkUploadContent = catchAsyncErrors(async (req, res, next) => {
+  console.log("bulkUploadContent: Started");
+  const session = await mongoose.startSession();
+  let transactionStarted = false;
+
+  try {
+    await session.startTransaction();
+    transactionStarted = true;
+    console.log("Transaction started");
+
+    const { courseId, moduleId } = req.params;
+    const { contentType } = req.body;
+
+    console.log(
+      `Bulk uploading ${contentType} content to module ${moduleId} for course: ${courseId}`
+    );
+
+    // Validate content type
+    if (!["pdf", "ppt", "video"].includes(contentType)) {
+      return next(
+        new ErrorHandler(
+          "Invalid content type for bulk upload. Must be pdf, ppt, or video",
+          400
+        )
+      );
+    }
+
+    // Check if teacher is authorized
+    const teacher = await Teacher.findOne({ user: req.user.id });
+    if (!teacher) {
+      console.log("Teacher not found");
+      return next(new ErrorHandler("Teacher not found", 404));
+    }
+
+    const course = await Course.findOne({
+      _id: courseId,
+      teacher: teacher._id,
+    });
+
+    if (!course) {
+      console.log("Course not found or teacher not authorized");
+      return next(new ErrorHandler("Course not found or unauthorized", 404));
+    }
+
+    // Find syllabus and module
+    const syllabus = await CourseSyllabus.findOne({ course: courseId }).session(
+      session
+    );
+    if (!syllabus) {
+      console.log(`No syllabus found for course: ${courseId}`);
+      return next(new ErrorHandler("No syllabus found for this course", 404));
+    }
+
+    const module = syllabus.modules.id(moduleId);
+    if (!module) {
+      console.log(`Module not found: ${moduleId}`);
+      return next(new ErrorHandler("Module not found", 404));
+    }
+
+    // Check if files are provided
+    if (!req.files || !req.files.files) {
+      return next(new ErrorHandler("No files uploaded", 400));
+    }
+
+    const files = Array.isArray(req.files.files)
+      ? req.files.files
+      : [req.files.files];
+    console.log(`Processing ${files.length} files for bulk upload`);
+
+    // Define allowed types based on content type
+    let allowedTypes = [];
+    let uploadPath = "";
+
+    switch (contentType) {
+      case "pdf":
+        allowedTypes = ["application/pdf"];
+        uploadPath = "syllabus-pdfs";
+        if (!module.pdfs) module.pdfs = [];
+        break;
+      case "ppt":
+        allowedTypes = [
+          "application/vnd.ms-powerpoint",
+          "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        ];
+        uploadPath = "syllabus-ppts";
+        if (!module.ppts) module.ppts = [];
+        break;
+      case "video":
+        allowedTypes = [
+          "video/mp4",
+          "video/webm",
+          "video/ogg",
+          "video/avi",
+          "video/mov",
+          "video/wmv",
+        ];
+        uploadPath = "syllabus-videos";
+        if (!module.videos) module.videos = [];
+        break;
+    }
+
+    const uploadedContentItems = [];
+
+    // Process each file
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+
+      try {
+        // Validate file type
+        if (!allowedTypes.includes(file.mimetype)) {
+          console.log(
+            `Skipping file ${file.name} - invalid type: ${file.mimetype}`
+          );
+          continue;
+        }
+
+        // Upload file to Azure
+        const uploadResult = await uploadFileToAzure(file, uploadPath);
+
+        // Create content item
+        const contentItem = {
+          name: file.name.split(".")[0], // Remove extension for name
+          description: `Bulk uploaded ${contentType.toUpperCase()}`,
+          createDate: new Date(),
+          isActive: true,
+          fileUrl: uploadResult.url,
+          fileKey: uploadResult.key,
+          fileName: file.name,
+          fileSize: file.size,
+          thumbnail: {
+            thumbnailUrl: "",
+            thumbnailKey: "",
+          },
+        };
+
+        // Add content type specific fields
+        if (contentType === "ppt") {
+          contentItem.presentationType =
+            file.mimetype === "application/vnd.ms-powerpoint" ? "ppt" : "pptx";
+        } else if (contentType === "video") {
+          contentItem.videoSize = file.size;
+          contentItem.duration = "";
+          contentItem.videoQuality = "auto";
+        }
+
+        // Set order based on current content count
+        switch (contentType) {
+          case "pdf":
+            contentItem.order = module.pdfs.length + i + 1;
+            module.pdfs.push(contentItem);
+            break;
+          case "ppt":
+            contentItem.order = module.ppts.length + i + 1;
+            module.ppts.push(contentItem);
+            break;
+          case "video":
+            contentItem.order = module.videos.length + i + 1;
+            module.videos.push(contentItem);
+            break;
+        }
+
+        uploadedContentItems.push(contentItem);
+        console.log(`Successfully processed file: ${file.name}`);
+      } catch (fileError) {
+        console.error(`Error processing file ${file.name}:`, fileError);
+        // Continue with other files instead of failing the entire operation
+      }
+    }
+
+    if (uploadedContentItems.length === 0) {
+      return next(new ErrorHandler("No valid files were uploaded", 400));
+    }
+
+    console.log("Saving updated syllabus");
+    await syllabus.save({ session });
+    console.log("Syllabus updated with bulk uploaded content");
+
+    console.log("Committing transaction");
+    await session.commitTransaction();
+    transactionStarted = false;
+    console.log("Transaction committed");
+
+    res.status(201).json({
+      success: true,
+      message: `Bulk upload completed successfully. ${uploadedContentItems.length} ${contentType} files uploaded.`,
+      contentType,
+      uploadedCount: uploadedContentItems.length,
+      totalFiles: files.length,
+      uploadedItems: uploadedContentItems,
+    });
+  } catch (error) {
+    console.log(`Error in bulkUploadContent: ${error.message}`);
+    if (transactionStarted) {
+      try {
+        console.log("Aborting transaction");
+        await session.abortTransaction();
+        console.log("Transaction aborted");
+      } catch (abortError) {
+        console.error("Error aborting transaction:", abortError);
+      }
+    }
+    return next(new ErrorHandler(error.message, 500));
+  } finally {
+    console.log("Ending session");
+    await session.endSession();
+    console.log("Session ended");
   }
 });
 

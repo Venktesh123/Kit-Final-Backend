@@ -52,6 +52,10 @@ const videoContentSchema = new mongoose.Schema({
     enum: ["HD", "SD", "4K", "auto"],
     default: "auto",
   },
+  order: {
+    type: Number,
+    default: 0,
+  },
 });
 
 const linkContentSchema = new mongoose.Schema({
@@ -100,6 +104,10 @@ const linkContentSchema = new mongoose.Schema({
     type: Boolean,
     default: true,
   },
+  order: {
+    type: Number,
+    default: 0,
+  },
 });
 
 const pdfContentSchema = new mongoose.Schema({
@@ -145,6 +153,10 @@ const pdfContentSchema = new mongoose.Schema({
     type: Number, // File size in bytes
   },
   pageCount: {
+    type: Number,
+    default: 0,
+  },
+  order: {
     type: Number,
     default: 0,
   },
@@ -201,9 +213,13 @@ const pptContentSchema = new mongoose.Schema({
     enum: ["ppt", "pptx", "odp"],
     default: "pptx",
   },
+  order: {
+    type: Number,
+    default: 0,
+  },
 });
 
-// Enhanced module schema with separate content arrays
+// Simplified module schema with only required content types
 const moduleSchema = new mongoose.Schema({
   moduleNumber: {
     type: Number,
@@ -217,69 +233,12 @@ const moduleSchema = new mongoose.Schema({
     type: String,
     default: "",
   },
-  topics: [
-    {
-      type: String,
-      required: true,
-    },
-  ],
 
-  // Separate arrays for different content types
+  // Only these content types are allowed
   videos: [videoContentSchema],
   links: [linkContentSchema],
   pdfs: [pdfContentSchema],
   ppts: [pptContentSchema],
-
-  // For backward compatibility - keep existing fields but deprecate
-  link: {
-    type: String,
-    default: "",
-  },
-  resources: [
-    {
-      fileType: {
-        type: String,
-        enum: ["pdf", "ppt", "pptx", "other"],
-        required: true,
-      },
-      fileUrl: {
-        type: String,
-        required: true,
-      },
-      fileKey: {
-        type: String,
-        required: true,
-      },
-      fileName: {
-        type: String,
-        required: true,
-      },
-      uploadDate: {
-        type: Date,
-        default: Date.now,
-      },
-    },
-  ],
-
-  // Existing content items field for backward compatibility
-  contentItems: [
-    {
-      type: {
-        type: String,
-        enum: ["file", "link", "video", "text"],
-        required: true,
-      },
-      title: {
-        type: String,
-        required: true,
-      },
-      description: {
-        type: String,
-        default: "",
-      },
-      // ... other contentItem fields as before
-    },
-  ],
 
   // Lectures for this module
   lectures: [
