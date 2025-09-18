@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const adminController = require("../controllers/adminController");
+const adminCourseController = require("../controllers/adminCourseController"); // ADD THIS LINE
 const auth = require("../middleware/auth");
 const { checkRole } = require("../middleware/roleCheck");
 const uploadMiddleware = require("../middleware/upload");
@@ -128,6 +129,50 @@ router.delete(
   auth,
   checkRole(["admin"]),
   adminController.deleteCourse
+);
+
+// ===============================
+// ADMIN COURSE MANAGEMENT ROUTES (by courseCode) - NEW SECTION
+// ===============================
+
+// Create new course by courseCode (admin only)
+router.post(
+  "/courses/create",
+  auth,
+  checkRole(["admin"]),
+  adminCourseController.createCourse
+);
+
+// Update course by courseCode (admin only)
+router.put(
+  "/courses/update",
+  auth,
+  checkRole(["admin"]),
+  adminCourseController.updateCourse
+);
+
+// Delete course by courseCode (admin only)
+router.delete(
+  "/courses/delete",
+  auth,
+  checkRole(["admin"]),
+  adminCourseController.deleteCourse
+);
+
+// Get course by courseCode (admin only)
+router.get(
+  "/courses/by-code/:courseCode",
+  auth,
+  checkRole(["admin"]),
+  adminCourseController.getCourseByCode
+);
+
+// Get all courses with advanced filtering (admin only)
+router.get(
+  "/courses/all",
+  auth,
+  checkRole(["admin"]),
+  adminCourseController.getAllCourses
 );
 
 // ===============================
