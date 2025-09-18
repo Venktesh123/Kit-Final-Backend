@@ -161,6 +161,7 @@ const createUserDataFromExcelRow = (userData) => {
 };
 
 // EXISTING FUNCTIONS (Keep all existing functions from the original file)
+// Modified uploadUsers function in adminController.js
 const uploadUsers = async (req, res) => {
   const session = await User.startSession();
   console.log("Processing user upload from in-memory data");
@@ -179,11 +180,13 @@ const uploadUsers = async (req, res) => {
     const users = req.excelData;
     const results = [];
     const teacherMap = new Map();
+    const errors = []; // Track validation errors
 
     await session.withTransaction(async () => {
       const teacherData = users.filter((user) => user.role === "teacher");
       const teachersByEmail = new Map();
 
+      // STEP 1: Collect all teachers and their course codes from Excel
       for (const userData of teacherData) {
         const email = userData.email.toLowerCase();
         const courseCode = userData.courseCode
@@ -201,6 +204,71 @@ const uploadUsers = async (req, res) => {
         }
       }
 
+      // STEP 2: Check for course code conflicts BEFORE processing any teachers
+      console.log("Validating course codes for conflicts...");
+
+      // Get all course codes from Excel upload
+      const allUploadCourseCodes = new Set();
+      for (const [email, teacherInfo] of teachersByEmail) {
+        for (const courseCode of teacherInfo.courseCodes) {
+          allUploadCourseCodes.add(courseCode);
+        }
+      }
+
+      // Check each course code against existing teachers in database
+      for (const courseCode of allUploadCourseCodes) {
+        // Find existing teachers with this course code
+        const existingTeachersWithCode = await Teacher.find({
+          courseCodes: courseCode,
+        })
+          .populate("user", "email name")
+          .session(session);
+
+        if (existingTeachersWithCode.length > 0) {
+          // Check if any of these existing teachers are NOT in the current upload
+          for (const existingTeacher of existingTeachersWithCode) {
+            const existingEmail = existingTeacher.user.email.toLowerCase();
+
+            // If this existing teacher is NOT in the current upload, it's a conflict
+            if (!teachersByEmail.has(existingEmail)) {
+              errors.push(
+                `Course code "${courseCode}" is already assigned to teacher: ${existingTeacher.user.name} (${existingTeacher.user.email}). Cannot assign to new teachers in upload.`
+              );
+            }
+          }
+        }
+      }
+
+      // Check for duplicate course codes within the Excel file itself
+      const courseCodeToEmails = new Map();
+      for (const [email, teacherInfo] of teachersByEmail) {
+        for (const courseCode of teacherInfo.courseCodes) {
+          if (!courseCodeToEmails.has(courseCode)) {
+            courseCodeToEmails.set(courseCode, []);
+          }
+          courseCodeToEmails.get(courseCode).push(email);
+        }
+      }
+
+      // Report any course codes assigned to multiple teachers in the same upload
+      for (const [courseCode, emails] of courseCodeToEmails) {
+        if (emails.length > 1) {
+          errors.push(
+            `Course code "${courseCode}" is assigned to multiple teachers in the same upload: ${emails.join(
+              ", "
+            )}. Each course code can only be assigned to one teacher.`
+          );
+        }
+      }
+
+      // STEP 3: If there are any validation errors, stop processing
+      if (errors.length > 0) {
+        throw new Error(`Course code validation failed:\n${errors.join("\n")}`);
+      }
+
+      // STEP 4: Process teachers (existing logic continues...)
+      console.log("Course code validation passed. Processing teachers...");
+
       for (const [email, teacherInfo] of teachersByEmail) {
         const existingUser = await User.findOne({ email }).session(session);
 
@@ -208,6 +276,7 @@ const uploadUsers = async (req, res) => {
         let teacher;
 
         if (existingUser) {
+          // Update existing user
           const updatedUserData = createUserDataFromExcelRow(
             teacherInfo.userData
           );
@@ -233,14 +302,13 @@ const uploadUsers = async (req, res) => {
             });
             await teacher.save({ session });
           } else {
-            const existingCodes = new Set(teacher.courseCodes);
-            for (const code of teacherInfo.courseCodes) {
-              existingCodes.add(code);
-            }
-            teacher.courseCodes = Array.from(existingCodes);
+            // For existing teachers, REPLACE course codes (don't merge)
+            // This ensures clean assignment based on Excel data
+            teacher.courseCodes = Array.from(teacherInfo.courseCodes);
             await teacher.save({ session });
           }
         } else {
+          // Create new user and teacher
           const newUserData = createUserDataFromExcelRow(teacherInfo.userData);
           newUserData.email = email;
 
@@ -256,6 +324,7 @@ const uploadUsers = async (req, res) => {
           await teacher.save({ session });
         }
 
+        // Store teacher mapping for student processing
         for (const courseCode of teacherInfo.courseCodes) {
           teacherMap.set(`${email}-${courseCode}`, teacher);
         }
@@ -275,6 +344,7 @@ const uploadUsers = async (req, res) => {
         });
       }
 
+      // STEP 5: Process students (existing logic continues...)
       const studentData = users.filter((user) => user.role === "student");
       const studentsByEmail = new Map();
 
@@ -420,12 +490,18 @@ const uploadUsers = async (req, res) => {
     });
 
     await session.endSession();
-    return res.status(201).json(results);
+    return res.status(201).json({
+      success: true,
+      message: "Users uploaded successfully with course code validation",
+      results: results,
+      totalProcessed: results.length,
+    });
   } catch (error) {
     await session.endSession();
     console.error("Upload error:", error);
 
     return res.status(400).json({
+      success: false,
       error: error.message || "Error processing upload",
       details: process.env.NODE_ENV === "development" ? error.stack : undefined,
     });
