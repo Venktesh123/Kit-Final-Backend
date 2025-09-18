@@ -6,21 +6,22 @@ const { checkRole } = require("../middleware/roleCheck");
 
 // Test route to verify router is working
 router.get("/test", (req, res) => {
-  res.json({ message: "Auth routes working" });
+  res.json({ message: "GetStudents routes working" });
 });
 
+// Get students for currently authenticated teacher (teacher, student, and admin)
 router.get(
   "/my-students",
-  auth, // Authentication middleware
-  checkRole(["teacher", "student"]), // Role check middleware
+  auth,
+  checkRole(["teacher", "student", "admin"]),
   studentController.getMyStudents
 );
 
-// Admin route to get students for any teacher by ID
+// Get students for any teacher by ID (teacher, student, and admin)
 router.get(
   "/teacher/:teacherId/students",
   auth,
-  checkRole(["teacher", "student"]),
+  checkRole(["teacher", "student", "admin"]),
   studentController.getStudentsByTeacherId
 );
 

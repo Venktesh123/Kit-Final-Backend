@@ -12,78 +12,78 @@ const {
 const auth = require("../middleware/auth");
 const { checkRole } = require("../middleware/roleCheck");
 
-// Get all modules with their lectures for a course
+// Get all modules with their lectures for a course (teacher, student, and admin)
 router.get(
   "/course/:courseId/modules",
   auth,
-  checkRole(["teacher", "student"]),
+  checkRole(["teacher", "student", "admin"]),
   getCourseModulesWithLectures
 );
 
-// Get all lectures for a specific module
+// Get all lectures for a specific module (teacher, student, and admin)
 router.get(
   "/course/:courseId/module/:moduleId/lectures",
   auth,
-  checkRole(["teacher", "student"]),
+  checkRole(["teacher", "student", "admin"]),
   getModuleLectures
 );
 
-// Create a new lecture for a specific module
+// Create a new lecture for a specific module (teacher and admin)
 router.post(
   "/course/:courseId/module/:moduleId/lectures",
   auth,
-  checkRole(["teacher"]),
+  checkRole(["teacher", "admin"]),
   createLectureForModule
 );
 
-// Get a specific lecture by ID
+// Get a specific lecture by ID (teacher, student, and admin)
 router.get(
   "/course/:courseId/module/:moduleId/lecture/:lectureId",
   auth,
-  checkRole(["teacher", "student"]),
+  checkRole(["teacher", "student", "admin"]),
   getLectureById
 );
 
-// Update a specific lecture
+// Update a specific lecture (teacher and admin)
 router.put(
   "/course/:courseId/module/:moduleId/lecture/:lectureId",
   auth,
-  checkRole(["teacher"]),
+  checkRole(["teacher", "admin"]),
   updateLecture
 );
 
-// Delete a specific lecture
+// Delete a specific lecture (teacher and admin)
 router.delete(
   "/course/:courseId/module/:moduleId/lecture/:lectureId",
   auth,
-  checkRole(["teacher"]),
+  checkRole(["teacher", "admin"]),
   deleteLecture
 );
 
-// Update lecture order within a module
+// Update lecture order within a module (teacher and admin)
 router.put(
   "/course/:courseId/module/:moduleId/lectures/reorder",
   auth,
-  checkRole(["teacher"]),
+  checkRole(["teacher", "admin"]),
   updateLectureOrder
 );
 
 // Backward compatibility routes (if needed)
 // These can be removed once frontend is updated
 
-// Legacy route: Get lectures for a course (now returns module-based structure)
+// Legacy route: Get lectures for a course (teacher, student, and admin)
 router.get(
   "/:courseId/lectures",
   auth,
-  checkRole(["teacher", "student"]),
+  checkRole(["teacher", "student", "admin"]),
   getCourseModulesWithLectures
 );
 
-// Legacy route: Get lecture by ID (redirects to new structure)
+// Legacy route: Get lecture by ID (teacher, student, and admin)
 router.get(
   "/:lectureId",
   auth,
-  checkRole(["teacher", "student"]),
+  checkRole(["teacher", "student", "admin"]),
   async (req, res) => {
     try {
       // Find the lecture to get its course and module info

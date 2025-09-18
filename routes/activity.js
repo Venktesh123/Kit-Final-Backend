@@ -4,59 +4,59 @@ const activityController = require("../controllers/activityController");
 const auth = require("../middleware/auth");
 const { checkRole } = require("../middleware/roleCheck");
 
-// Create a new activity (teacher only)
+// Create a new activity (teacher and admin)
 router.post(
   "/courses/:courseId/activities",
   auth,
-  checkRole(["teacher"]),
+  checkRole(["teacher", "admin"]),
   activityController.createActivity
 );
 
-// Submit an activity (student only)
+// Submit an activity (student and admin)
 router.post(
   "/activities/:activityId/submit",
   auth,
-  checkRole(["student"]),
+  checkRole(["student", "admin"]),
   activityController.submitActivity
 );
 
-// Grade a submission (teacher only)
+// Grade a submission (teacher and admin)
 router.post(
   "/activities/:activityId/submissions/:submissionId/grade",
   auth,
-  checkRole(["teacher"]),
+  checkRole(["teacher", "admin"]),
   activityController.gradeSubmission
 );
 
-// Get all activities for a course
+// Get all activities for a course (teacher, student, and admin)
 router.get(
   "/courses/:courseId/activities",
   auth,
-  checkRole(["teacher", "student"]),
+  checkRole(["teacher", "student", "admin"]),
   activityController.getCourseActivities
 );
 
-// Get a specific activity
+// Get a specific activity (teacher, student, and admin)
 router.get(
   "/activities/:activityId",
   auth,
-  checkRole(["teacher", "student"]),
+  checkRole(["teacher", "student", "admin"]),
   activityController.getActivityById
 );
 
-// Update an activity (teacher only)
+// Update an activity (teacher and admin)
 router.put(
   "/activities/:activityId",
   auth,
-  checkRole(["teacher"]),
+  checkRole(["teacher", "admin"]),
   activityController.updateActivity
 );
 
-// Delete an activity (teacher only)
+// Delete an activity (teacher and admin)
 router.delete(
   "/activities/:activityId",
   auth,
-  checkRole(["teacher"]),
+  checkRole(["teacher", "admin"]),
   activityController.deleteActivity
 );
 
