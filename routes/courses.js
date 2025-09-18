@@ -12,40 +12,50 @@ const {
 const auth = require("../middleware/auth");
 const { checkRole } = require("../middleware/roleCheck");
 
-// Get all courses for teacher/student
-router.get("/", auth, checkRole(["teacher", "student"]), getUserCourses);
+// Get all courses for teacher/student (teacher, student, and admin)
+router.get(
+  "/",
+  auth,
+  checkRole(["teacher", "student", "admin"]),
+  getUserCourses
+);
 
-// Get enrolled courses for students
+// Get enrolled courses for students (teacher, student, and admin)
 router.get(
   "/student",
   auth,
-  checkRole(["teacher", "student"]),
+  checkRole(["teacher", "student", "admin"]),
   getEnrolledCourses
 );
 
-// Get specific course by ID (includes module-wise lectures)
+// Get specific course by ID (teacher, student, and admin)
 router.get(
   "/:courseId",
   auth,
-  checkRole(["teacher", "student"]),
+  checkRole(["teacher", "student", "admin"]),
   getCourseById
 );
 
-// Create new course
-router.post("/", auth, checkRole(["teacher"]), createCourse);
+// Create new course (teacher and admin)
+router.post("/", auth, checkRole(["teacher", "admin"]), createCourse);
 
-// Update course
-router.put("/:courseId", auth, checkRole(["teacher"]), updateCourse);
+// Update course (teacher and admin)
+router.put("/:courseId", auth, checkRole(["teacher", "admin"]), updateCourse);
 
-// Update course attendance only
+// Update course attendance only (teacher and admin)
 router.put(
   "/:courseId/attendance",
   auth,
-  checkRole(["teacher"]),
+  checkRole(["teacher", "admin"]),
   updateCourseAttendance
 );
 
-// Delete course
-router.delete("/:courseId", auth, checkRole(["teacher"]), deleteCourse);
+// Delete course (teacher and admin)
+router.delete(
+  "/:courseId",
+  auth,
+  checkRole(["teacher", "admin"]),
+  deleteCourse
+);
 
 module.exports = router;
