@@ -24,6 +24,32 @@ const logger = {
     console.error(`[ADMIN-COURSE-ERROR] ${message}`, error),
 };
 
+// Helper function to find teacher by course code
+const findTeacherByCourseCode = async (courseCode, session = null) => {
+  logger.info(`Looking for teacher with course code: ${courseCode}`);
+
+  const teacher = await Teacher.findOne({
+    courseCodes: courseCode.toUpperCase().trim(),
+  })
+    .populate({
+      path: "user",
+      select: "name email mobileNo gender ageAsOn2025",
+    })
+    .session(session);
+
+  if (!teacher) {
+    throw new ErrorHandler(
+      `No teacher found with course code: ${courseCode}. This course code is not assigned to any teacher.`,
+      404
+    );
+  }
+
+  logger.info(
+    `Found teacher: ${teacher.user?.name} (${teacher.email}) for course code: ${courseCode}`
+  );
+  return teacher;
+};
+
 // Helper function to format course response with teacher info
 const formatCourseResponse = async (course) => {
   const populatedCourse = await Course.findById(course._id)
@@ -144,7 +170,6 @@ exports.createCourse = catchAsyncErrors(async (req, res, next) => {
       courseCode,
       title,
       aboutCourse,
-      teacherEmail,
       semester,
       learningOutcomes,
       courseSchedule,
@@ -159,22 +184,13 @@ exports.createCourse = catchAsyncErrors(async (req, res, next) => {
       return next(new ErrorHandler("Course code is required", 400));
     }
 
-    if (!title || !aboutCourse || !teacherEmail) {
-      logger.error("Missing required fields: title, aboutCourse, teacherEmail");
-      return next(
-        new ErrorHandler(
-          "Title, aboutCourse, and teacherEmail are required",
-          400
-        )
-      );
+    if (!title || !aboutCourse) {
+      logger.error("Missing required fields: title, aboutCourse");
+      return next(new ErrorHandler("Title and aboutCourse are required", 400));
     }
 
     const normalizedCourseCode = courseCode.toUpperCase().trim();
-    const normalizedTeacherEmail = teacherEmail.toLowerCase().trim();
-
-    logger.info(
-      `Creating course with code: ${normalizedCourseCode} for teacher: ${normalizedTeacherEmail}`
-    );
+    logger.info(`Creating course with code: ${normalizedCourseCode}`);
 
     // Check if course code already exists
     const existingCourse = await Course.findOne({
@@ -191,31 +207,11 @@ exports.createCourse = catchAsyncErrors(async (req, res, next) => {
       );
     }
 
-    // Find teacher by email
-    const teacher = await Teacher.findOne({
-      email: normalizedTeacherEmail,
-    })
-      .populate("user", "name email mobileNo gender ageAsOn2025")
-      .session(session);
-
-    if (!teacher) {
-      logger.error(`Teacher not found with email: ${normalizedTeacherEmail}`);
-      return next(
-        new ErrorHandler(
-          `Teacher not found with email: ${normalizedTeacherEmail}`,
-          404
-        )
-      );
-    }
-
-    // Add course code to teacher's course codes if not already present
-    if (!teacher.courseCodes.includes(normalizedCourseCode)) {
-      teacher.courseCodes.push(normalizedCourseCode);
-      await teacher.save({ session });
-      logger.info(
-        `Added course code ${normalizedCourseCode} to teacher ${teacher.email}`
-      );
-    }
+    // Find teacher by course code (instead of email)
+    const teacher = await findTeacherByCourseCode(
+      normalizedCourseCode,
+      session
+    );
 
     // Create main course
     const courseData = {
@@ -376,7 +372,7 @@ exports.createCourse = catchAsyncErrors(async (req, res, next) => {
       }
     }
 
-    return next(new ErrorHandler(error.message, 500));
+    return next(new ErrorHandler(error.message, error.statusCode || 500));
   } finally {
     await session.endSession();
     logger.info("Session ended");
@@ -400,7 +396,6 @@ exports.updateCourse = catchAsyncErrors(async (req, res, next) => {
       newCourseCode,
       title,
       aboutCourse,
-      teacherEmail,
       semester,
       learningOutcomes,
       courseSchedule,
@@ -435,69 +430,11 @@ exports.updateCourse = catchAsyncErrors(async (req, res, next) => {
     }
 
     let currentTeacher = await Teacher.findById(course.teacher)
-      .populate("user", "name email mobileNo gender ageAsOn2025")
+      .populate({
+        path: "user",
+        select: "name email mobileNo gender ageAsOn2025",
+      })
       .session(session);
-
-    // Handle teacher change if teacherEmail is provided
-    if (teacherEmail) {
-      const normalizedTeacherEmail = teacherEmail.toLowerCase().trim();
-
-      if (normalizedTeacherEmail !== currentTeacher.email) {
-        logger.info(
-          `Changing teacher from ${currentTeacher.email} to ${normalizedTeacherEmail}`
-        );
-
-        // Find new teacher
-        const newTeacher = await Teacher.findOne({
-          email: normalizedTeacherEmail,
-        })
-          .populate("user", "name email mobileNo gender ageAsOn2025")
-          .session(session);
-
-        if (!newTeacher) {
-          logger.error(
-            `New teacher not found with email: ${normalizedTeacherEmail}`
-          );
-          return next(
-            new ErrorHandler(
-              `Teacher not found with email: ${normalizedTeacherEmail}`,
-              404
-            )
-          );
-        }
-
-        // Remove course code from old teacher if they don't have other courses with this code
-        const oldTeacherOtherCourses = await Course.countDocuments({
-          teacher: currentTeacher._id,
-          courseCode: normalizedCourseCode,
-          _id: { $ne: course._id },
-        }).session(session);
-
-        if (oldTeacherOtherCourses === 0) {
-          currentTeacher.courseCodes = currentTeacher.courseCodes.filter(
-            (code) => code !== normalizedCourseCode
-          );
-          currentTeacher.courses = currentTeacher.courses.filter(
-            (id) => !id.equals(course._id)
-          );
-          await currentTeacher.save({ session });
-        }
-
-        // Add course code to new teacher if not present
-        if (!newTeacher.courseCodes.includes(normalizedCourseCode)) {
-          newTeacher.courseCodes.push(normalizedCourseCode);
-        }
-        if (!newTeacher.courses.includes(course._id)) {
-          newTeacher.courses.push(course._id);
-        }
-        await newTeacher.save({ session });
-
-        // Update course teacher
-        course.teacher = newTeacher._id;
-        currentTeacher = newTeacher;
-        logger.info(`Teacher changed successfully`);
-      }
-    }
 
     // Handle course code change
     if (
@@ -528,38 +465,88 @@ exports.updateCourse = catchAsyncErrors(async (req, res, next) => {
         `Changing course code from ${normalizedCourseCode} to ${normalizedNewCourseCode}`
       );
 
+      // Find teacher for new course code
+      const newTeacher = await findTeacherByCourseCode(
+        normalizedNewCourseCode,
+        session
+      );
+
+      // If different teacher, update teacher assignments
+      if (!currentTeacher._id.equals(newTeacher._id)) {
+        logger.info(
+          `Changing teacher from ${currentTeacher.email} to ${newTeacher.email}`
+        );
+
+        // Remove course from old teacher
+        currentTeacher.courses = currentTeacher.courses.filter(
+          (id) => !id.equals(course._id)
+        );
+        await currentTeacher.save({ session });
+
+        // Add course to new teacher
+        if (!newTeacher.courses.includes(course._id)) {
+          newTeacher.courses.push(course._id);
+        }
+        await newTeacher.save({ session });
+
+        // Update course teacher
+        course.teacher = newTeacher._id;
+        currentTeacher = newTeacher;
+      }
+
       // Update course code
       course.courseCode = normalizedNewCourseCode;
 
-      // Update teacher's course codes
-      const oldCodeIndex =
-        currentTeacher.courseCodes.indexOf(normalizedCourseCode);
-      if (oldCodeIndex !== -1) {
-        currentTeacher.courseCodes[oldCodeIndex] = normalizedNewCourseCode;
-        await currentTeacher.save({ session });
+      // Update student enrollments
+      const studentsWithOldCode = await Student.find({
+        teacher: currentTeacher._id,
+        courseCodes: normalizedCourseCode,
+        courses: course._id,
+      }).session(session);
+
+      for (const student of studentsWithOldCode) {
+        // Remove old course code and add new one
+        student.courseCodes = student.courseCodes.filter(
+          (code) => code !== normalizedCourseCode
+        );
+        if (!student.courseCodes.includes(normalizedNewCourseCode)) {
+          student.courseCodes.push(normalizedNewCourseCode);
+        }
+        await student.save({ session });
       }
 
-      // Update students' course codes
-      await Student.updateMany(
-        {
-          teacher: currentTeacher._id,
-          courseCodes: normalizedCourseCode,
-          courses: course._id,
-        },
-        {
-          $set: { "courseCodes.$": normalizedNewCourseCode },
-        },
-        { session }
-      );
+      // Add course to students with new course code who don't already have it
+      const studentsWithNewCode = await Student.find({
+        teacher: currentTeacher._id,
+        courseCodes: normalizedNewCourseCode,
+        courses: { $nin: [course._id] },
+      }).session(session);
 
-      logger.info(`Course code updated to ${normalizedNewCourseCode}`);
+      for (const student of studentsWithNewCode) {
+        student.courses.push(course._id);
+        await student.save({ session });
+      }
+
+      logger.info(`Updated student enrollments for course code change`);
+    } else if (
+      newCourseCode &&
+      newCourseCode.toUpperCase().trim() === normalizedCourseCode
+    ) {
+      // If newCourseCode is provided but same as current, validate teacher still has access
+      await findTeacherByCourseCode(normalizedCourseCode, session);
+    } else {
+      // No course code change, validate current teacher still has access to current course code
+      await findTeacherByCourseCode(normalizedCourseCode, session);
     }
 
-    // Update basic course fields
+    // Update other main course fields
     if (title) course.title = title.trim();
     if (aboutCourse) course.aboutCourse = aboutCourse.trim();
     if (semester) course.semester = semester;
     if (isActive !== undefined) course.isActive = isActive;
+
+    await course.save({ session });
+    logger.info("Updated main course fields");
 
     // Update learning outcomes
     if (learningOutcomes) {
@@ -569,7 +556,7 @@ exports.updateCourse = catchAsyncErrors(async (req, res, next) => {
           { outcomes: learningOutcomes },
           { session }
         );
-        logger.info(`Updated existing learning outcomes`);
+        logger.info(`Updated existing learning outcomes: ${course.outcomes}`);
       } else {
         const outcome = await CourseOutcome.create(
           [
@@ -581,7 +568,8 @@ exports.updateCourse = catchAsyncErrors(async (req, res, next) => {
           { session }
         );
         course.outcomes = outcome[0]._id;
-        logger.info(`Created new learning outcomes`);
+        await course.save({ session });
+        logger.info(`Created new learning outcomes: ${outcome[0]._id}`);
       }
     }
 
@@ -593,7 +581,7 @@ exports.updateCourse = catchAsyncErrors(async (req, res, next) => {
           courseSchedule,
           { session }
         );
-        logger.info(`Updated existing schedule`);
+        logger.info(`Updated existing schedule: ${course.schedule}`);
       } else {
         const schedule = await CourseSchedule.create(
           [
@@ -605,7 +593,8 @@ exports.updateCourse = catchAsyncErrors(async (req, res, next) => {
           { session }
         );
         course.schedule = schedule[0]._id;
-        logger.info(`Created new schedule`);
+        await course.save({ session });
+        logger.info(`Created new schedule: ${schedule[0]._id}`);
       }
     }
 
@@ -617,7 +606,7 @@ exports.updateCourse = catchAsyncErrors(async (req, res, next) => {
           { weeks: weeklyPlan },
           { session }
         );
-        logger.info(`Updated existing weekly plan`);
+        logger.info(`Updated existing weekly plan: ${course.weeklyPlan}`);
       } else {
         const weeklyPlanDoc = await WeeklyPlan.create(
           [
@@ -629,7 +618,8 @@ exports.updateCourse = catchAsyncErrors(async (req, res, next) => {
           { session }
         );
         course.weeklyPlan = weeklyPlanDoc[0]._id;
-        logger.info(`Created new weekly plan`);
+        await course.save({ session });
+        logger.info(`Created new weekly plan: ${weeklyPlanDoc[0]._id}`);
       }
     }
 
@@ -641,7 +631,7 @@ exports.updateCourse = catchAsyncErrors(async (req, res, next) => {
           creditPoints,
           { session }
         );
-        logger.info(`Updated existing credit points`);
+        logger.info(`Updated existing credit points: ${course.creditPoints}`);
       } else {
         const creditPointsDoc = await CreditPoints.create(
           [
@@ -653,7 +643,8 @@ exports.updateCourse = catchAsyncErrors(async (req, res, next) => {
           { session }
         );
         course.creditPoints = creditPointsDoc[0]._id;
-        logger.info(`Created new credit points`);
+        await course.save({ session });
+        logger.info(`Created new credit points: ${creditPointsDoc[0]._id}`);
       }
     }
 
@@ -667,7 +658,7 @@ exports.updateCourse = catchAsyncErrors(async (req, res, next) => {
           { sessions: sessionsMap },
           { session }
         );
-        logger.info(`Updated existing attendance`);
+        logger.info(`Updated existing attendance: ${course.attendance}`);
       } else {
         const attendanceDoc = await CourseAttendance.create(
           [
@@ -679,13 +670,12 @@ exports.updateCourse = catchAsyncErrors(async (req, res, next) => {
           { session }
         );
         course.attendance = attendanceDoc[0]._id;
-        logger.info(`Created new attendance`);
+        await course.save({ session });
+        logger.info(`Created new attendance: ${attendanceDoc[0]._id}`);
       }
     }
 
-    // Save updated course
-    await course.save({ session });
-
+    logger.info("Committing transaction");
     await session.commitTransaction();
     transactionStarted = false;
     logger.info("Transaction committed successfully");
@@ -710,7 +700,7 @@ exports.updateCourse = catchAsyncErrors(async (req, res, next) => {
       }
     }
 
-    return next(new ErrorHandler(error.message, 500));
+    return next(new ErrorHandler(error.message, error.statusCode || 500));
   } finally {
     await session.endSession();
     logger.info("Session ended");
@@ -771,29 +761,25 @@ exports.deleteCourse = catchAsyncErrors(async (req, res, next) => {
       `Deleting course: ${course.title} (${course.courseCode}) taught by ${teacher?.email}`
     );
 
-    // Delete all related documents and files
-
-    // 1. Delete course outcomes
+    // Delete all related documents and files (same as original implementation)
     if (course.outcomes) {
       await CourseOutcome.findByIdAndDelete(course.outcomes).session(session);
       logger.info(`Deleted course outcomes: ${course.outcomes}`);
     }
 
-    // 2. Delete course schedule
     if (course.schedule) {
       await CourseSchedule.findByIdAndDelete(course.schedule).session(session);
       logger.info(`Deleted course schedule: ${course.schedule}`);
     }
 
-    // 3. Delete syllabus and all associated files
     if (course.syllabus) {
+      // Delete syllabus content files from Azure
       const syllabus = await CourseSyllabus.findById(course.syllabus).session(
         session
       );
       if (syllabus) {
         const filesToDelete = [];
 
-        // Collect all file keys from syllabus modules
         syllabus.modules.forEach((module) => {
           if (module.videos) {
             module.videos.forEach((video) => {
@@ -833,7 +819,7 @@ exports.deleteCourse = catchAsyncErrors(async (req, res, next) => {
             try {
               await deleteFileFromAzure(fileKey);
             } catch (azureError) {
-              logger.error(`Error deleting file ${fileKey}:`, azureError);
+              logger.error("Error deleting file from Azure:", azureError);
             }
           });
           await Promise.allSettled(deletePromises);
@@ -844,13 +830,11 @@ exports.deleteCourse = catchAsyncErrors(async (req, res, next) => {
       logger.info(`Deleted course syllabus: ${course.syllabus}`);
     }
 
-    // 4. Delete weekly plan
     if (course.weeklyPlan) {
       await WeeklyPlan.findByIdAndDelete(course.weeklyPlan).session(session);
       logger.info(`Deleted weekly plan: ${course.weeklyPlan}`);
     }
 
-    // 5. Delete credit points
     if (course.creditPoints) {
       await CreditPoints.findByIdAndDelete(course.creditPoints).session(
         session
@@ -858,7 +842,6 @@ exports.deleteCourse = catchAsyncErrors(async (req, res, next) => {
       logger.info(`Deleted credit points: ${course.creditPoints}`);
     }
 
-    // 6. Delete course attendance
     if (course.attendance) {
       await CourseAttendance.findByIdAndDelete(course.attendance).session(
         session
@@ -866,126 +849,75 @@ exports.deleteCourse = catchAsyncErrors(async (req, res, next) => {
       logger.info(`Deleted course attendance: ${course.attendance}`);
     }
 
-    // 7. Delete all lectures and their video files
+    // Delete all lectures for this course
     const lectures = await Lecture.find({ course: course._id }).session(
       session
     );
-    if (lectures.length > 0) {
-      logger.info(`Deleting ${lectures.length} lectures`);
-      for (const lecture of lectures) {
-        if (lecture.videoKey) {
-          try {
-            await deleteFileFromAzure(lecture.videoKey);
-            logger.info(`Deleted lecture video: ${lecture.videoKey}`);
-          } catch (deleteError) {
-            logger.error("Error deleting lecture video:", deleteError);
-          }
+    for (const lecture of lectures) {
+      if (lecture.videoKey) {
+        try {
+          await deleteFileFromAzure(lecture.videoKey);
+          logger.info(`Deleted video from Azure: ${lecture.videoKey}`);
+        } catch (deleteError) {
+          logger.error("Error deleting video file:", deleteError);
         }
       }
-      await Lecture.deleteMany({ course: course._id }).session(session);
     }
+    await Lecture.deleteMany({ course: course._id }).session(session);
 
-    // 8. Delete all assignments and their files
+    // Delete assignments and their files
     const assignments = await Assignment.find({ course: course._id }).session(
       session
     );
-    if (assignments.length > 0) {
-      logger.info(`Deleting ${assignments.length} assignments`);
-      for (const assignment of assignments) {
-        // Delete attachment files
-        if (assignment.attachments?.length > 0) {
-          for (const attachment of assignment.attachments) {
-            try {
-              await deleteFileFromAzure(attachment.key);
-            } catch (deleteError) {
-              logger.error(
-                "Error deleting assignment attachment:",
-                deleteError
-              );
-            }
+    for (const assignment of assignments) {
+      // Delete attachment files
+      if (assignment.attachments?.length > 0) {
+        for (const attachment of assignment.attachments) {
+          try {
+            await deleteFileFromAzure(attachment.key);
+          } catch (deleteError) {
+            logger.error("Error deleting assignment attachment:", deleteError);
           }
         }
-        // Delete submission files
-        if (assignment.submissions?.length > 0) {
-          for (const submission of assignment.submissions) {
-            if (submission.submissionFileKey) {
-              try {
-                await deleteFileFromAzure(submission.submissionFileKey);
-              } catch (deleteError) {
-                logger.error("Error deleting submission file:", deleteError);
-              }
+      }
+      // Delete submission files
+      if (assignment.submissions?.length > 0) {
+        for (const submission of assignment.submissions) {
+          if (submission.submissionFileKey) {
+            try {
+              await deleteFileFromAzure(submission.submissionFileKey);
+            } catch (deleteError) {
+              logger.error("Error deleting submission file:", deleteError);
             }
           }
         }
       }
-      await Assignment.deleteMany({ course: course._id }).session(session);
     }
+    await Assignment.deleteMany({ course: course._id }).session(session);
 
-    // 9. Delete all announcements and their images
+    // Delete announcements and their images
     const announcements = await Announcement.find({
       course: course._id,
     }).session(session);
-    if (announcements.length > 0) {
-      logger.info(`Deleting ${announcements.length} announcements`);
-      for (const announcement of announcements) {
-        if (announcement.image?.imageKey) {
-          try {
-            await deleteFileFromAzure(announcement.image.imageKey);
-          } catch (deleteError) {
-            logger.error("Error deleting announcement image:", deleteError);
-          }
+    for (const announcement of announcements) {
+      if (announcement.image?.imageKey) {
+        try {
+          await deleteFileFromAzure(announcement.image.imageKey);
+        } catch (deleteError) {
+          logger.error("Error deleting announcement image:", deleteError);
         }
       }
-      await Announcement.deleteMany({ course: course._id }).session(session);
     }
+    await Announcement.deleteMany({ course: course._id }).session(session);
 
-    // 10. Delete all discussions
-    const discussions = await Discussion.find({ course: course._id }).session(
-      session
-    );
-    if (discussions.length > 0) {
-      logger.info(`Deleting ${discussions.length} discussions`);
-      for (const discussion of discussions) {
-        // Delete discussion attachments
-        if (discussion.attachments?.length > 0) {
-          for (const attachment of discussion.attachments) {
-            try {
-              await deleteFileFromAzure(attachment.fileKey);
-            } catch (deleteError) {
-              logger.error(
-                "Error deleting discussion attachment:",
-                deleteError
-              );
-            }
-          }
-        }
-        // Delete comment attachments
-        if (discussion.comments?.length > 0) {
-          for (const comment of discussion.comments) {
-            if (comment.attachments?.length > 0) {
-              for (const attachment of comment.attachments) {
-                try {
-                  await deleteFileFromAzure(attachment.fileKey);
-                } catch (deleteError) {
-                  logger.error(
-                    "Error deleting comment attachment:",
-                    deleteError
-                  );
-                }
-              }
-            }
-          }
-        }
-      }
-      await Discussion.deleteMany({ course: course._id }).session(session);
-    }
+    // Delete discussions
+    await Discussion.deleteMany({ course: course._id }).session(session);
 
-    // 11. Delete EContent
+    // Delete EContent
     const eContent = await EContent.findOne({ course: course._id }).session(
       session
     );
     if (eContent) {
-      logger.info("Deleting EContent");
       for (const module of eContent.modules) {
         if (module.files?.length > 0) {
           for (const file of module.files) {
@@ -997,36 +929,17 @@ exports.deleteCourse = catchAsyncErrors(async (req, res, next) => {
           }
         }
       }
-      await EContent.deleteMany({ course: course._id }).session(session);
     }
+    await EContent.deleteMany({ course: course._id }).session(session);
 
-    // 12. Update teacher - remove course and course code if no other courses use it
+    // Remove course from teacher's courses
     if (teacher) {
-      // Remove course from teacher's courses array
       teacher.courses = teacher.courses.filter((id) => !id.equals(course._id));
-
-      // Check if teacher has other courses with this course code
-      const otherCoursesWithSameCode = await Course.countDocuments({
-        teacher: teacher._id,
-        courseCode: normalizedCourseCode,
-        _id: { $ne: course._id },
-      }).session(session);
-
-      // Remove course code only if no other courses use it
-      if (otherCoursesWithSameCode === 0) {
-        teacher.courseCodes = teacher.courseCodes.filter(
-          (code) => code !== normalizedCourseCode
-        );
-        logger.info(
-          `Removed course code ${normalizedCourseCode} from teacher ${teacher.email}`
-        );
-      }
-
       await teacher.save({ session });
       logger.info(`Updated teacher ${teacher.email}`);
     }
 
-    // 13. Remove course from all students
+    // Remove course from all students
     const studentsWithCourse = await Student.find({
       courses: course._id,
     }).session(session);
@@ -1042,7 +955,7 @@ exports.deleteCourse = catchAsyncErrors(async (req, res, next) => {
       await Promise.all(updatePromises);
     }
 
-    // 14. Finally, delete the course itself
+    // Delete the course itself
     await Course.findByIdAndDelete(course._id).session(session);
     logger.info(`Deleted course: ${course._id}`);
 
@@ -1058,7 +971,6 @@ exports.deleteCourse = catchAsyncErrors(async (req, res, next) => {
         lecturesDeleted: lectures.length,
         assignmentsDeleted: assignments.length,
         announcementsDeleted: announcements.length,
-        discussionsDeleted: discussions.length,
         studentsAffected: studentsWithCourse.length,
       },
     });
@@ -1074,7 +986,7 @@ exports.deleteCourse = catchAsyncErrors(async (req, res, next) => {
       }
     }
 
-    return next(new ErrorHandler(error.message, 500));
+    return next(new ErrorHandler(error.message, error.statusCode || 500));
   } finally {
     await session.endSession();
     logger.info("Session ended");
@@ -1121,7 +1033,7 @@ exports.getCourseByCode = catchAsyncErrors(async (req, res, next) => {
     });
   } catch (error) {
     logger.error("Error in admin getCourseByCode:", error);
-    return next(new ErrorHandler(error.message, 500));
+    return next(new ErrorHandler(error.message, error.statusCode || 500));
   }
 });
 
@@ -1134,7 +1046,6 @@ exports.getAllCourses = catchAsyncErrors(async (req, res, next) => {
       page = 1,
       limit = 10,
       courseCode,
-      teacherEmail,
       isActive,
       sortBy = "createdAt",
       sortOrder = "desc",
@@ -1153,31 +1064,6 @@ exports.getAllCourses = catchAsyncErrors(async (req, res, next) => {
 
     if (isActive !== undefined) {
       query.isActive = isActive === "true";
-    }
-
-    // Handle teacher email filter
-    if (teacherEmail) {
-      const teachers = await Teacher.find({
-        email: { $regex: teacherEmail, $options: "i" },
-      });
-      const teacherIds = teachers.map((t) => t._id);
-      if (teacherIds.length > 0) {
-        query.teacher = { $in: teacherIds };
-      } else {
-        // No teachers found with that email
-        return res.status(200).json({
-          success: true,
-          message: "No courses found",
-          pagination: {
-            currentPage: pageNum,
-            totalPages: 0,
-            totalCourses: 0,
-            hasNext: false,
-            hasPrev: false,
-          },
-          courses: [],
-        });
-      }
     }
 
     // Get total count
@@ -1216,7 +1102,234 @@ exports.getAllCourses = catchAsyncErrors(async (req, res, next) => {
     });
   } catch (error) {
     logger.error("Error in admin getAllCourses:", error);
-    return next(new ErrorHandler(error.message, 500));
+    return next(new ErrorHandler(error.message, error.statusCode || 500));
+  }
+});
+
+// Get courses by specific course code with teacher info
+exports.getCoursesByCode = catchAsyncErrors(async (req, res, next) => {
+  logger.info("Admin getCoursesByCode: Started");
+
+  try {
+    const { courseCode } = req.params;
+    logger.info(`Fetching courses for course code: ${courseCode}`);
+
+    if (!courseCode) {
+      return next(new ErrorHandler("Course code is required", 400));
+    }
+
+    const normalizedCourseCode = courseCode.toUpperCase().trim();
+
+    // First, check if any teacher has this course code
+    const teacher = await Teacher.findOne({
+      courseCodes: normalizedCourseCode,
+    }).populate({
+      path: "user",
+      select: "name email mobileNo gender ageAsOn2025",
+    });
+
+    if (!teacher) {
+      return res.status(200).json({
+        success: true,
+        message: `Course code ${normalizedCourseCode} is not assigned to any teacher`,
+        courseCode: normalizedCourseCode,
+        teacher: null,
+        courses: [],
+        isValidCourseCode: false,
+      });
+    }
+
+    // Find all courses with this course code
+    const courses = await Course.find({ courseCode: normalizedCourseCode })
+      .populate("semester", "name startDate endDate")
+      .sort({ createdAt: -1 });
+
+    // Format courses with statistics
+    const coursesWithStats = await Promise.all(
+      courses.map((course) => formatCourseResponse(course))
+    );
+
+    res.status(200).json({
+      success: true,
+      message: `Found ${courses.length} courses for course code: ${normalizedCourseCode}`,
+      courseCode: normalizedCourseCode,
+      teacher: {
+        _id: teacher._id,
+        name: teacher.user?.name || "Unknown",
+        email: teacher.email,
+        mobileNo: teacher.user?.mobileNo || "",
+        gender: teacher.user?.gender || "",
+        age: teacher.user?.ageAsOn2025 || null,
+        courseCodes: teacher.courseCodes,
+      },
+      totalCourses: courses.length,
+      courses: coursesWithStats,
+      isValidCourseCode: true,
+    });
+  } catch (error) {
+    logger.error("Error in admin getCoursesByCode:", error);
+    return next(new ErrorHandler(error.message, error.statusCode || 500));
+  }
+});
+
+// Bulk operations for admin
+exports.bulkCreateCourses = catchAsyncErrors(async (req, res, next) => {
+  logger.info("Admin bulkCreateCourses: Started");
+
+  const session = await mongoose.startSession();
+  let transactionStarted = false;
+
+  try {
+    await session.startTransaction();
+    transactionStarted = true;
+    logger.info("Transaction started");
+
+    const { courses } = req.body;
+
+    if (!courses || !Array.isArray(courses) || courses.length === 0) {
+      return next(new ErrorHandler("Courses array is required", 400));
+    }
+
+    const results = [];
+    const errors = [];
+
+    for (const courseData of courses) {
+      try {
+        const {
+          courseCode,
+          title,
+          aboutCourse,
+          semester,
+          learningOutcomes,
+          courseSchedule,
+          weeklyPlan,
+          creditPoints,
+        } = courseData;
+
+        if (!courseCode || !title || !aboutCourse) {
+          errors.push({
+            courseCode: courseCode || "UNKNOWN",
+            error: "Missing required fields: courseCode, title, or aboutCourse",
+          });
+          continue;
+        }
+
+        const normalizedCourseCode = courseCode.toUpperCase().trim();
+
+        // Check if course already exists
+        const existingCourse = await Course.findOne({
+          courseCode: normalizedCourseCode,
+        }).session(session);
+
+        if (existingCourse) {
+          errors.push({
+            courseCode: normalizedCourseCode,
+            error: "Course with this code already exists",
+          });
+          continue;
+        }
+
+        // Find teacher by course code
+        const teacher = await findTeacherByCourseCode(
+          normalizedCourseCode,
+          session
+        );
+
+        // Create course
+        const course = new Course({
+          title: title.trim(),
+          aboutCourse: aboutCourse.trim(),
+          courseCode: normalizedCourseCode,
+          semester: semester,
+          teacher: teacher._id,
+          isActive: true,
+        });
+
+        await course.save({ session });
+
+        // Create basic syllabus
+        const syllabus = await CourseSyllabus.create(
+          [
+            {
+              modules: [],
+              course: course._id,
+            },
+          ],
+          { session }
+        );
+
+        course.syllabus = syllabus[0]._id;
+        await course.save({ session });
+
+        // Add to teacher's courses
+        if (!teacher.courses.includes(course._id)) {
+          teacher.courses.push(course._id);
+          await teacher.save({ session });
+        }
+
+        // Add to matching students
+        const matchingStudents = await Student.find({
+          teacher: teacher._id,
+          courseCodes: normalizedCourseCode,
+        }).session(session);
+
+        for (const student of matchingStudents) {
+          if (!student.courses.includes(course._id)) {
+            student.courses.push(course._id);
+            await student.save({ session });
+          }
+        }
+
+        results.push({
+          courseCode: normalizedCourseCode,
+          courseId: course._id,
+          teacherEmail: teacher.email,
+          enrolledStudents: matchingStudents.length,
+          success: true,
+        });
+      } catch (courseError) {
+        logger.error(
+          `Error creating course ${courseData.courseCode}:`,
+          courseError
+        );
+        errors.push({
+          courseCode: courseData.courseCode || "UNKNOWN",
+          error: courseError.message,
+        });
+      }
+    }
+
+    await session.commitTransaction();
+    transactionStarted = false;
+    logger.info("Bulk creation transaction committed successfully");
+
+    res.status(200).json({
+      success: true,
+      message: `Bulk course creation completed. ${results.length} courses created, ${errors.length} errors`,
+      summary: {
+        totalRequested: courses.length,
+        successful: results.length,
+        failed: errors.length,
+      },
+      results,
+      errors: errors.length > 0 ? errors : undefined,
+    });
+  } catch (error) {
+    logger.error("Error in admin bulkCreateCourses:", error);
+
+    if (transactionStarted) {
+      try {
+        await session.abortTransaction();
+        logger.info("Transaction aborted");
+      } catch (abortError) {
+        logger.error("Error aborting transaction:", abortError);
+      }
+    }
+
+    return next(new ErrorHandler(error.message, error.statusCode || 500));
+  } finally {
+    await session.endSession();
+    logger.info("Session ended");
   }
 });
 
