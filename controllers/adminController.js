@@ -696,6 +696,7 @@ const getAllCourseCodes = catchAsyncErrors(async (req, res, next) => {
             teacherCount: 0,
             studentCount: 0,
             courseCount: 0,
+            courses: [], // NEW: Array to store course information
           };
         }
         courseCodeDetails[code].teachers.push({
@@ -706,18 +707,58 @@ const getAllCourseCodes = catchAsyncErrors(async (req, res, next) => {
       });
     });
 
-    // Get student counts for each course code
+    // Get detailed information for each course code
     for (const courseCode of allCourseCodes) {
+      // Get student count for this course code
       const studentCount = await Student.countDocuments({
         courseCodes: courseCode,
       });
       courseCodeDetails[courseCode].studentCount = studentCount;
 
-      // Get actual course count for this course code
-      const courseCount = await Course.countDocuments({
+      // Get courses for this course code with detailed information
+      const courses = await Course.find({
         courseCode: courseCode,
-      });
-      courseCodeDetails[courseCode].courseCount = courseCount;
+      })
+        .populate("teacher", "email")
+        .populate({
+          path: "teacher",
+          populate: {
+            path: "user",
+            select: "name email",
+          },
+        })
+        .populate("semester", "name startDate endDate")
+        .select("title aboutCourse courseCode isActive createdAt updatedAt");
+
+      courseCodeDetails[courseCode].courseCount = courses.length;
+
+      // Format course information
+      if (courses.length > 0) {
+        courseCodeDetails[courseCode].courses = courses.map((course) => ({
+          _id: course._id,
+          title: course.title,
+          aboutCourse: course.aboutCourse,
+          isActive: course.isActive,
+          createdAt: course.createdAt,
+          updatedAt: course.updatedAt,
+          teacher: {
+            _id: course.teacher._id,
+            name: course.teacher.user?.name || "Unknown",
+            email: course.teacher.email,
+          },
+          semester: course.semester
+            ? {
+                _id: course.semester._id,
+                name: course.semester.name,
+                startDate: course.semester.startDate,
+                endDate: course.semester.endDate,
+              }
+            : null,
+        }));
+      } else {
+        // If no courses exist for this code, set courses to null
+        courseCodeDetails[courseCode].courses = null;
+      }
     }
 
     const formattedCourseCodes = Object.values(courseCodeDetails);
@@ -733,7 +774,6 @@ const getAllCourseCodes = catchAsyncErrors(async (req, res, next) => {
     return next(new ErrorHandler(error.message, 500));
   }
 });
-
 // Get courses by course code
 const getCoursesByCode = catchAsyncErrors(async (req, res, next) => {
   console.log("getCoursesByCode: Started");
