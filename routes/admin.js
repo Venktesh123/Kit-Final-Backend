@@ -142,7 +142,13 @@ router.post(
   checkRole(["admin"]),
   adminCourseController.createCourse
 );
+router.get(
+  "/courses/:courseId/modules",
+  auth,
+  checkRole(["admin", "teacher", "student"]),
 
+  adminCourseController.getAllCoursesgetCourseModules
+);
 // Update course by courseCode (admin only)
 router.put(
   "/courses/update",
