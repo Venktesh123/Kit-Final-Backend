@@ -1332,5 +1332,100 @@ exports.bulkCreateCourses = catchAsyncErrors(async (req, res, next) => {
     logger.info("Session ended");
   }
 });
+// Add this function to controllers/adminController.js
+
+// Get all modules for a course with minimal information
+exports.getAllCoursesgetCourseModules = catchAsyncErrors(
+  async (req, res, next) => {
+    console.log("getCourseModules: Started");
+
+    try {
+      const { courseId } = req.params;
+      console.log(`Fetching modules for course: ${courseId}`);
+
+      if (!courseId) {
+        return next(new ErrorHandler("Course ID is required", 400));
+      }
+
+      // Verify course exists
+      const course = await Course.findById(courseId);
+      if (!course) {
+        return next(new ErrorHandler("Course not found", 404));
+      }
+
+      // Find the course syllabus
+      const syllabus = await CourseSyllabus.findOne({ course: courseId });
+
+      if (!syllabus) {
+        return res.status(200).json({
+          success: true,
+          message: "No modules found for this course",
+          courseId: courseId,
+          courseName: course.title,
+          courseCode: course.courseCode,
+          modules: [],
+        });
+      }
+
+      // Format modules with minimal information
+      const modules = syllabus.modules.map((module) => {
+        // Count different content types
+        const videoCount = module.videos ? module.videos.length : 0;
+        const linkCount = module.links ? module.links.length : 0;
+        const pdfCount = module.pdfs ? module.pdfs.length : 0;
+        const pptCount = module.ppts ? module.ppts.length : 0;
+        const lectureCount = module.lectures ? module.lectures.length : 0;
+        const totalContentCount =
+          videoCount + linkCount + pdfCount + pptCount + lectureCount;
+
+        return {
+          _id: module._id,
+          moduleNumber: module.moduleNumber,
+          moduleTitle: module.moduleTitle,
+          description: module.description || "",
+          isActive: module.isActive,
+          order: module.order,
+          contentCounts: {
+            videos: videoCount,
+            links: linkCount,
+            pdfs: pdfCount,
+            ppts: pptCount,
+            lectures: lectureCount,
+            total: totalContentCount,
+          },
+          hasContent: totalContentCount > 0,
+          createdAt: module.createdAt,
+          updatedAt: module.updatedAt,
+        };
+      });
+
+      // Sort modules by order or moduleNumber
+      modules.sort(
+        (a, b) => (a.order || a.moduleNumber) - (b.order || b.moduleNumber)
+      );
+
+      console.log(`Found ${modules.length} modules for course ${courseId}`);
+
+      res.status(200).json({
+        success: true,
+        message: "Course modules retrieved successfully",
+        courseId: courseId,
+        courseName: course.title,
+        courseCode: course.courseCode,
+        moduleCount: modules.length,
+        totalContentItems: modules.reduce(
+          (sum, module) => sum + module.contentCounts.total,
+          0
+        ),
+        modules: modules,
+      });
+    } catch (error) {
+      console.error("Error in getCourseModules:", error);
+      return next(new ErrorHandler(error.message, 500));
+    }
+  }
+);
+
+// Add this to the module.exports at the bottom of adminController.js
 
 module.exports = exports;
