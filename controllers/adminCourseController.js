@@ -1336,6 +1336,7 @@ exports.bulkCreateCourses = catchAsyncErrors(async (req, res, next) => {
 
 // Get all modules for a course with minimal information
 // Enhanced getCourseModules function with comprehensive module information
+// Optimized getCourseModules function - removes redundant role checks since they're handled in routes
 exports.getAllCoursesgetCourseModules = catchAsyncErrors(
   async (req, res, next) => {
     console.log("getCourseModules: Started");
@@ -1359,27 +1360,9 @@ exports.getAllCoursesgetCourseModules = catchAsyncErrors(
         return next(new ErrorHandler("Course not found", 404));
       }
 
-      // Verify user access to course
-      let userHasAccess = false;
-      let userRole = req.user.role;
-
-      if (userRole === "teacher") {
-        const teacher = await Teacher.findOne({ user: req.user.id });
-        if (teacher && course.teacher._id.equals(teacher._id)) {
-          userHasAccess = true;
-        }
-      } else if (userRole === "student") {
-        const student = await Student.findOne({ user: req.user.id });
-        if (student && student.courses.includes(courseId)) {
-          userHasAccess = true;
-        }
-      } else if (userRole === "admin") {
-        userHasAccess = true;
-      }
-
-      if (!userHasAccess) {
-        return next(new ErrorHandler("Access denied to this course", 403));
-      }
+      // Role authorization is handled by route middleware checkRole()
+      // We can directly proceed since only authorized roles can reach this point
+      const userRole = req.user.role;
 
       // Find the course syllabus with populated lectures
       const syllabus = await CourseSyllabus.findOne({
@@ -1420,11 +1403,11 @@ exports.getAllCoursesgetCourseModules = catchAsyncErrors(
       // Format modules with comprehensive information
       const modules = syllabus.modules.map((module) => {
         // Count different content types
-        const videoCount = module.videos ? module.videos.length : 0;
-        const linkCount = module.links ? module.links.length : 0;
-        const pdfCount = module.pdfs ? module.pdfs.length : 0;
-        const pptCount = module.ppts ? module.ppts.length : 0;
-        const lectureCount = module.lectures ? module.lectures.length : 0;
+        const videoCount = module.videos?.length || 0;
+        const linkCount = module.links?.length || 0;
+        const pdfCount = module.pdfs?.length || 0;
+        const pptCount = module.ppts?.length || 0;
+        const lectureCount = module.lectures?.length || 0;
         const totalContentCount =
           videoCount + linkCount + pdfCount + pptCount + lectureCount;
 
@@ -1455,16 +1438,15 @@ exports.getAllCoursesgetCourseModules = catchAsyncErrors(
             lectureCount > 0
               ? {
                   total: lectureCount,
-                  reviewed: module.lectures
-                    ? module.lectures.filter((l) => l.isReviewed).length
-                    : 0,
-                  pending: module.lectures
-                    ? module.lectures.filter((l) => !l.isReviewed).length
-                    : 0,
+                  reviewed:
+                    module.lectures?.filter((l) => l.isReviewed).length || 0,
+                  pending:
+                    module.lectures?.filter((l) => !l.isReviewed).length || 0,
                   completion:
                     lectureCount > 0
                       ? Math.round(
-                          (module.lectures.filter((l) => l.isReviewed).length /
+                          ((module.lectures?.filter((l) => l.isReviewed)
+                            .length || 0) /
                             lectureCount) *
                             100
                         )
@@ -1475,7 +1457,6 @@ exports.getAllCoursesgetCourseModules = catchAsyncErrors(
 
         // Include full content details if requested
         if (includeContent === "true") {
-          // Sort content by order
           moduleInfo.content = {
             videos: module.videos
               ? [...module.videos]
@@ -1553,26 +1534,28 @@ exports.getAllCoursesgetCourseModules = catchAsyncErrors(
             lectures: module.lectures
               ? [...module.lectures]
                   .sort((a, b) => (a.lectureOrder || 0) - (b.lectureOrder || 0))
-                  .map((lecture) => ({
-                    _id: lecture._id,
-                    title: lecture.title,
-                    content: lecture.content,
-                    videoUrl:
-                      userRole === "student"
-                        ? lecture.isReviewed
-                          ? lecture.videoUrl
-                          : null
-                        : lecture.videoUrl,
-                    moduleNumber: lecture.moduleNumber,
-                    lectureOrder: lecture.lectureOrder,
-                    isReviewed: lecture.isReviewed,
-                    reviewDeadline: lecture.reviewDeadline,
-                    createdAt: lecture.createdAt,
-                    updatedAt: lecture.updatedAt,
-                    // Hide video URL from students if not reviewed
-                    accessRestricted:
-                      userRole === "student" && !lecture.isReviewed,
-                  }))
+                  .map((lecture) => {
+                    // Apply student-specific restrictions for video access
+                    const videoUrl =
+                      userRole === "student" && !lecture.isReviewed
+                        ? null
+                        : lecture.videoUrl;
+
+                    return {
+                      _id: lecture._id,
+                      title: lecture.title,
+                      content: lecture.content,
+                      videoUrl: videoUrl,
+                      moduleNumber: lecture.moduleNumber,
+                      lectureOrder: lecture.lectureOrder,
+                      isReviewed: lecture.isReviewed,
+                      reviewDeadline: lecture.reviewDeadline,
+                      createdAt: lecture.createdAt,
+                      updatedAt: lecture.updatedAt,
+                      accessRestricted:
+                        userRole === "student" && !lecture.isReviewed,
+                    };
+                  })
               : [],
           };
 
@@ -1590,7 +1573,6 @@ exports.getAllCoursesgetCourseModules = catchAsyncErrors(
             totalDuration: (module.videos || [])
               .filter((v) => v.duration)
               .reduce((total, video) => {
-                // Convert duration string "MM:SS" to seconds
                 const parts = video.duration.split(":");
                 const minutes = parseInt(parts[0]) || 0;
                 const seconds = parseInt(parts[1]) || 0;
