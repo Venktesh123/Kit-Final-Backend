@@ -1335,39 +1335,89 @@ exports.bulkCreateCourses = catchAsyncErrors(async (req, res, next) => {
 // Add this function to controllers/adminController.js
 
 // Get all modules for a course with minimal information
+// Enhanced getCourseModules function with comprehensive module information
 exports.getAllCoursesgetCourseModules = catchAsyncErrors(
   async (req, res, next) => {
     console.log("getCourseModules: Started");
 
     try {
       const { courseId } = req.params;
+      const { includeContent = "true", sortBy = "order" } = req.query;
+
       console.log(`Fetching modules for course: ${courseId}`);
 
       if (!courseId) {
         return next(new ErrorHandler("Course ID is required", 400));
       }
 
-      // Verify course exists
-      const course = await Course.findById(courseId);
+      // Verify course exists and get course details
+      const course = await Course.findById(courseId)
+        .populate("teacher", "email")
+        .populate("semester", "name startDate endDate");
+
       if (!course) {
         return next(new ErrorHandler("Course not found", 404));
       }
 
-      // Find the course syllabus
-      const syllabus = await CourseSyllabus.findOne({ course: courseId });
+      // Verify user access to course
+      let userHasAccess = false;
+      let userRole = req.user.role;
+
+      if (userRole === "teacher") {
+        const teacher = await Teacher.findOne({ user: req.user.id });
+        if (teacher && course.teacher._id.equals(teacher._id)) {
+          userHasAccess = true;
+        }
+      } else if (userRole === "student") {
+        const student = await Student.findOne({ user: req.user.id });
+        if (student && student.courses.includes(courseId)) {
+          userHasAccess = true;
+        }
+      } else if (userRole === "admin") {
+        userHasAccess = true;
+      }
+
+      if (!userHasAccess) {
+        return next(new ErrorHandler("Access denied to this course", 403));
+      }
+
+      // Find the course syllabus with populated lectures
+      const syllabus = await CourseSyllabus.findOne({
+        course: courseId,
+      }).populate({
+        path: "modules.lectures",
+        model: "Lecture",
+        select:
+          "title content videoUrl videoKey moduleNumber lectureOrder isReviewed reviewDeadline createdAt updatedAt",
+      });
 
       if (!syllabus) {
         return res.status(200).json({
           success: true,
           message: "No modules found for this course",
-          courseId: courseId,
-          courseName: course.title,
-          courseCode: course.courseCode,
+          courseInfo: {
+            _id: course._id,
+            title: course.title,
+            courseCode: course.courseCode,
+            teacher: course.teacher,
+            semester: course.semester,
+          },
           modules: [],
+          summary: {
+            moduleCount: 0,
+            totalContentItems: 0,
+            contentBreakdown: {
+              videos: 0,
+              links: 0,
+              pdfs: 0,
+              ppts: 0,
+              lectures: 0,
+            },
+          },
         });
       }
 
-      // Format modules with minimal information
+      // Format modules with comprehensive information
       const modules = syllabus.modules.map((module) => {
         // Count different content types
         const videoCount = module.videos ? module.videos.length : 0;
@@ -1378,13 +1428,18 @@ exports.getAllCoursesgetCourseModules = catchAsyncErrors(
         const totalContentCount =
           videoCount + linkCount + pdfCount + pptCount + lectureCount;
 
-        return {
+        // Base module information
+        const moduleInfo = {
           _id: module._id,
           moduleNumber: module.moduleNumber,
           moduleTitle: module.moduleTitle,
           description: module.description || "",
           isActive: module.isActive,
           order: module.order,
+          createdAt: module.createdAt,
+          updatedAt: module.updatedAt,
+
+          // Content statistics
           contentCounts: {
             videos: videoCount,
             links: linkCount,
@@ -1394,30 +1449,251 @@ exports.getAllCoursesgetCourseModules = catchAsyncErrors(
             total: totalContentCount,
           },
           hasContent: totalContentCount > 0,
-          createdAt: module.createdAt,
-          updatedAt: module.updatedAt,
+
+          // Lecture statistics (if any)
+          lectureStats:
+            lectureCount > 0
+              ? {
+                  total: lectureCount,
+                  reviewed: module.lectures
+                    ? module.lectures.filter((l) => l.isReviewed).length
+                    : 0,
+                  pending: module.lectures
+                    ? module.lectures.filter((l) => !l.isReviewed).length
+                    : 0,
+                  completion:
+                    lectureCount > 0
+                      ? Math.round(
+                          (module.lectures.filter((l) => l.isReviewed).length /
+                            lectureCount) *
+                            100
+                        )
+                      : 0,
+                }
+              : null,
         };
+
+        // Include full content details if requested
+        if (includeContent === "true") {
+          // Sort content by order
+          moduleInfo.content = {
+            videos: module.videos
+              ? [...module.videos]
+                  .sort((a, b) => (a.order || 0) - (b.order || 0))
+                  .map((video) => ({
+                    _id: video._id,
+                    name: video.name,
+                    description: video.description,
+                    fileUrl: video.fileUrl,
+                    fileName: video.fileName,
+                    duration: video.duration,
+                    videoSize: video.videoSize,
+                    videoQuality: video.videoQuality,
+                    thumbnail: video.thumbnail,
+                    createDate: video.createDate,
+                    isActive: video.isActive,
+                    order: video.order,
+                  }))
+              : [],
+
+            links: module.links
+              ? [...module.links]
+                  .sort((a, b) => (a.order || 0) - (b.order || 0))
+                  .map((link) => ({
+                    _id: link._id,
+                    name: link.name,
+                    description: link.description,
+                    fileUrl: link.fileUrl,
+                    linkType: link.linkType,
+                    isExternal: link.isExternal,
+                    thumbnail: link.thumbnail,
+                    createDate: link.createDate,
+                    isActive: link.isActive,
+                    order: link.order,
+                  }))
+              : [],
+
+            pdfs: module.pdfs
+              ? [...module.pdfs]
+                  .sort((a, b) => (a.order || 0) - (b.order || 0))
+                  .map((pdf) => ({
+                    _id: pdf._id,
+                    name: pdf.name,
+                    description: pdf.description,
+                    fileUrl: pdf.fileUrl,
+                    fileName: pdf.fileName,
+                    fileSize: pdf.fileSize,
+                    pageCount: pdf.pageCount,
+                    thumbnail: pdf.thumbnail,
+                    createDate: pdf.createDate,
+                    isActive: pdf.isActive,
+                    order: pdf.order,
+                  }))
+              : [],
+
+            ppts: module.ppts
+              ? [...module.ppts]
+                  .sort((a, b) => (a.order || 0) - (b.order || 0))
+                  .map((ppt) => ({
+                    _id: ppt._id,
+                    name: ppt.name,
+                    description: ppt.description,
+                    fileUrl: ppt.fileUrl,
+                    fileName: ppt.fileName,
+                    fileSize: ppt.fileSize,
+                    slideCount: ppt.slideCount,
+                    presentationType: ppt.presentationType,
+                    thumbnail: ppt.thumbnail,
+                    createDate: ppt.createDate,
+                    isActive: ppt.isActive,
+                    order: ppt.order,
+                  }))
+              : [],
+
+            lectures: module.lectures
+              ? [...module.lectures]
+                  .sort((a, b) => (a.lectureOrder || 0) - (b.lectureOrder || 0))
+                  .map((lecture) => ({
+                    _id: lecture._id,
+                    title: lecture.title,
+                    content: lecture.content,
+                    videoUrl:
+                      userRole === "student"
+                        ? lecture.isReviewed
+                          ? lecture.videoUrl
+                          : null
+                        : lecture.videoUrl,
+                    moduleNumber: lecture.moduleNumber,
+                    lectureOrder: lecture.lectureOrder,
+                    isReviewed: lecture.isReviewed,
+                    reviewDeadline: lecture.reviewDeadline,
+                    createdAt: lecture.createdAt,
+                    updatedAt: lecture.updatedAt,
+                    // Hide video URL from students if not reviewed
+                    accessRestricted:
+                      userRole === "student" && !lecture.isReviewed,
+                  }))
+              : [],
+          };
+
+          // Calculate content duration and size totals
+          moduleInfo.contentSummary = {
+            totalSize: [
+              ...(module.videos || []),
+              ...(module.pdfs || []),
+              ...(module.ppts || []),
+            ].reduce(
+              (sum, item) => sum + (item.fileSize || item.videoSize || 0),
+              0
+            ),
+
+            totalDuration: (module.videos || [])
+              .filter((v) => v.duration)
+              .reduce((total, video) => {
+                // Convert duration string "MM:SS" to seconds
+                const parts = video.duration.split(":");
+                const minutes = parseInt(parts[0]) || 0;
+                const seconds = parseInt(parts[1]) || 0;
+                return total + minutes * 60 + seconds;
+              }, 0),
+          };
+        }
+
+        return moduleInfo;
       });
 
-      // Sort modules by order or moduleNumber
-      modules.sort(
-        (a, b) => (a.order || a.moduleNumber) - (b.order || b.moduleNumber)
-      );
+      // Sort modules based on query parameter
+      const sortedModules = modules.sort((a, b) => {
+        switch (sortBy) {
+          case "moduleNumber":
+            return a.moduleNumber - b.moduleNumber;
+          case "title":
+            return a.moduleTitle.localeCompare(b.moduleTitle);
+          case "contentCount":
+            return b.contentCounts.total - a.contentCounts.total;
+          case "updated":
+            return new Date(b.updatedAt) - new Date(a.updatedAt);
+          case "order":
+          default:
+            return (a.order || a.moduleNumber) - (b.order || b.moduleNumber);
+        }
+      });
+
+      // Calculate summary statistics
+      const summary = {
+        moduleCount: modules.length,
+        activeModuleCount: modules.filter((m) => m.isActive).length,
+        totalContentItems: modules.reduce(
+          (sum, module) => sum + module.contentCounts.total,
+          0
+        ),
+        contentBreakdown: {
+          videos: modules.reduce(
+            (sum, module) => sum + module.contentCounts.videos,
+            0
+          ),
+          links: modules.reduce(
+            (sum, module) => sum + module.contentCounts.links,
+            0
+          ),
+          pdfs: modules.reduce(
+            (sum, module) => sum + module.contentCounts.pdfs,
+            0
+          ),
+          ppts: modules.reduce(
+            (sum, module) => sum + module.contentCounts.ppts,
+            0
+          ),
+          lectures: modules.reduce(
+            (sum, module) => sum + module.contentCounts.lectures,
+            0
+          ),
+        },
+        overallProgress: {
+          totalLectures: modules.reduce(
+            (sum, module) => sum + module.contentCounts.lectures,
+            0
+          ),
+          reviewedLectures: modules.reduce(
+            (sum, module) =>
+              sum + (module.lectureStats ? module.lectureStats.reviewed : 0),
+            0
+          ),
+          completionPercentage: 0,
+        },
+      };
+
+      // Calculate overall completion percentage
+      if (summary.overallProgress.totalLectures > 0) {
+        summary.overallProgress.completionPercentage = Math.round(
+          (summary.overallProgress.reviewedLectures /
+            summary.overallProgress.totalLectures) *
+            100
+        );
+      }
 
       console.log(`Found ${modules.length} modules for course ${courseId}`);
 
       res.status(200).json({
         success: true,
         message: "Course modules retrieved successfully",
-        courseId: courseId,
-        courseName: course.title,
-        courseCode: course.courseCode,
-        moduleCount: modules.length,
-        totalContentItems: modules.reduce(
-          (sum, module) => sum + module.contentCounts.total,
-          0
-        ),
-        modules: modules,
+        courseInfo: {
+          _id: course._id,
+          title: course.title,
+          courseCode: course.courseCode,
+          teacher: {
+            _id: course.teacher._id,
+            email: course.teacher.email,
+          },
+          semester: course.semester,
+        },
+        modules: sortedModules,
+        summary: summary,
+        userRole: userRole,
+        requestOptions: {
+          includeContent: includeContent === "true",
+          sortBy: sortBy,
+        },
       });
     } catch (error) {
       console.error("Error in getCourseModules:", error);
@@ -1425,7 +1701,6 @@ exports.getAllCoursesgetCourseModules = catchAsyncErrors(
     }
   }
 );
-
 // Add this to the module.exports at the bottom of adminController.js
 
 module.exports = exports;
